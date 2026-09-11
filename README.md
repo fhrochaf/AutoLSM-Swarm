@@ -171,3 +171,9 @@ Each run writes to `runs/<run_id>/`: per-round, per-agent `skill.md`/`pipeline.p
 ## License
 
 GPL-3.0 — see [LICENSE.txt](LICENSE.txt).
+
+## References
+
+Hwang, H., Kim, J., Kim, C., Chang, H., & Ye, J. C. (2026). *AgentPSO: Evolving Agent
+Reasoning Skill via Multi-agent Particle Swarm Optimization*. arXiv:2605.08704.
+https://arxiv.org/abs/2605.08704v2

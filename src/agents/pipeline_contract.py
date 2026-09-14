@@ -84,6 +84,16 @@ def smoke_test(mod: ModuleType, X_sample: np.ndarray, y_sample: np.ndarray) -> A
             "Threshold/binarize inside predict() before returning."
         )
 
+    if y_sample.any() and not preds.any():
+        raise ContractError(
+            "model.predict(...) returned an entirely empty mask (no landslide pixels "
+            "predicted anywhere), even though the smoke sample includes tiles with "
+            "labeled landslide pixels and the model was just trained directly on this "
+            "same sample. This is the all-background collapse failure mode -- "
+            "strengthen your class-imbalance handling (loss weighting, threshold, etc.) "
+            "so the model can predict the positive class at all."
+        )
+
     return model
 
 

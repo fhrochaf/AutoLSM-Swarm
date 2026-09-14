@@ -1,5 +1,5 @@
-"""LangGraph state for the round loop. Mirrors AgentPSO's particle bookkeeping:
-each agent carries a skill (position), a velocity (semantic update direction), and
+"""LangGraph state for the round loop. Each agent carries a skill (position),
+a velocity (semantic update direction), and
 its personal-best; the swarm carries a global-best."""
 from __future__ import annotations
 
@@ -38,3 +38,4 @@ class SwarmState(BaseModel):
     g_best_skill: str | None = None
     g_best_score: float = float("-inf")
     rounds_without_improvement: int = 0  # consecutive rounds g_best_score hasn't improved
+    in_progress_agents: dict[int, AgentState] = {}

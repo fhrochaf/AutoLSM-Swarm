@@ -81,9 +81,10 @@ def main(argv: list[str] | None = None) -> None:
     if args.resume is not None:
         run_id = args.resume
         state = load_run_state(run_id, settings, settings.n_rounds)
+        mid_round = f", {len(state.in_progress_agents)} agent(s) already done this round" if state.in_progress_agents else ""
         print(
             f"Resuming run {run_id}: {len(state.agents)} agent(s), "
-            f"round {state.round} -> {settings.n_rounds}"
+            f"round {state.round} -> {settings.n_rounds}{mid_round}"
         )
         recursion_limit = max(settings.n_rounds - state.round, 1) + 10
     else:
@@ -94,7 +95,11 @@ def main(argv: list[str] | None = None) -> None:
 
         # Loading dataset to cache
         build_data_cache(
-            settings.dataset_dir, data_npz_path, settings.max_train_tiles, settings.max_val_tiles
+            settings.dataset_dir,
+            data_npz_path,
+            settings.max_train_tiles,
+            settings.max_val_tiles,
+            settings.smoke_tile_ids,
         )
 
         state = create_initial_state(settings, run_id, data_npz_path)

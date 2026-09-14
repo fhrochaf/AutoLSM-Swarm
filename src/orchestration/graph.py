@@ -1,8 +1,7 @@
 """The round loop, wired as a LangGraph StateGraph.
 
 Round 0 seeds every agent from the literature corpus and generates its first
-pipeline.py. Later rounds ask peer_review (see peer_review.py -- AgentPSO's
-Reflect/VelocityUpdate/SkillUpdate chain) to revise each agent's skill against the
+pipeline.py. Later rounds ask peer_review to revise each agent's skill against the
 swarm's global-best and its own personal-best; when there are no peers to reflect
 against (n_agents == 1), that agent's previous round is simply carried forward instead
 of wastefully re-running an identical pipeline.
@@ -20,13 +19,14 @@ import shutil
 import time
 from pathlib import Path
 
+from langchain.chat_models import init_chat_model
 from langchain_core.documents import Document
 from langgraph.graph import END, StateGraph
 
 from tqdm import tqdm
 
 from agents import skill as skill_io
-from agents.codegen import generate_pipeline, get_llm, write_skill
+from agents.codegen import generate_pipeline, write_skill
 from agents.prompts import RETRIEVAL_QUERY
 from agents.runner import run_agent_round
 from config import Settings
@@ -68,10 +68,12 @@ def load_run_state(run_id: str, settings: Settings, target_n_rounds: int) -> Swa
     """Reconstruct a SwarmState from an existing run's checkpoint to keep training it.
 
     Reads only runs/<run_id>/state_snapshot.json -- the single, always-overwritten
-    checkpoint _run_round_node writes at the end of every round -- and the run's kept
-    dataset cache. No earlier round's files are read: the snapshot already holds every
-    agent's current velocity/p_best/skill/code and the swarm's global-best, so there is
-    nothing to replay.
+    checkpoint _run_round_node writes after every agent (not just every round) -- and
+    the run's kept dataset cache. No earlier round's files are read: the snapshot
+    already holds every agent's current velocity/p_best/skill/code and the swarm's
+    global-best, so there is nothing to replay. If the snapshot was taken mid-round
+    (some but not all agents done), `state.in_progress_agents` carries those agents'
+    already-finished results and `_run_round_node` skips re-running them.
     """
     run_dir = settings.runs_dir / run_id
     snapshot_path = run_dir / "state_snapshot.json"
@@ -111,16 +113,53 @@ def load_run_state(run_id: str, settings: Settings, target_n_rounds: int) -> Swa
 
 
 def _run_round_node(state: SwarmState, settings: Settings) -> dict:
-    llm = get_llm(settings)
+    llm = init_chat_model(
+        model=settings.model_name,
+        model_provider=settings.llm_provider,
+        api_key=settings.api_key or None,
+        # temperature=settings.temperature,
+        max_tokens=16000,
+    )
+
+    judge_llm = init_chat_model(
+        model=settings.model_name_2,
+        model_provider=settings.llm_provider_2,
+        api_key=settings.api_key_2 or None,
+        # temperature=settings.temperature,
+        max_tokens=2000,
+    )
+
+    # Used only for pipeline.py creation (generate_pipeline/fix_pipeline/
+    # revise_pipeline_for_fidelity) -- kept separate from the primary model above.
+    code_llm = init_chat_model(
+        model=settings.model_name_3,
+        model_provider=settings.llm_provider_3,
+        api_key=settings.api_key_3 or None,
+        # temperature=settings.temperature,
+        max_tokens=16000,
+    )
     round_idx = state.round
     data_npz_path = Path(state.data_npz_path)
-    updated_agents: list[AgentState] = []
+    snapshot_path = settings.runs_dir / state.run_id / "state_snapshot.json"
+
+    # Agents already checkpointed for this round (e.g. resuming after a mid-round
+    # interrupt) are skipped -- their results are reused as-is instead of rerun.
+    in_progress = dict(state.in_progress_agents)
+    remaining = [a for a in state.agents if a.agent_idx not in in_progress]
+
+    def _checkpoint() -> None:
+        snapshot_path.write_text(
+            state.model_copy(update={"in_progress_agents": dict(in_progress)}).model_dump_json(indent=2),
+            encoding="utf-8",
+        )
 
     tqdm.write(f"\n=== Round {round_idx}/{state.n_rounds - 1} ===")
-    agent_bar = tqdm(state.agents, desc=f"round {round_idx}", unit="agent")
+    if in_progress:
+        tqdm.write(f"round {round_idx}: resuming -- {len(in_progress)} agent(s) already done this round")
+    agent_bar = tqdm(remaining, desc=f"round {round_idx}", unit="agent")
 
     agent_docs: list[list[Document]] = []
-    if round_idx == 0:
+    if round_idx == 0 and remaining:
         # First round: no prior result to react to -- every agent starts from the same
         # dataset-derived query (RETRIEVAL_QUERY, "how do I map this kind of target given
         # this kind of dataset"), but retrieve_diverse shards one shared candidate pool
@@ -179,16 +218,24 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
                     "cited_papers": cited_papers,
                 },
             )
-            updated_agents.append(new_agent)
+            in_progress[agent.agent_idx] = new_agent
+            _checkpoint()
             continue
 
         skill_io.write_skill(agent_dir, skill_md)
         tqdm.write(f"{tag} skill.md updated; generating pipeline.py...")
-        code = generate_pipeline(llm, skill_md)
+        code = generate_pipeline(code_llm, skill_md)
 
         tqdm.write(f"{tag} running pipeline (train + evaluate, up to {settings.max_debug_iters} debug iters)...")
         result = run_agent_round(
-            agent_dir, code, llm, data_npz_path, settings.max_debug_iters, settings.exec_timeout_s
+            agent_dir,
+            skill_md,
+            code,
+            code_llm,
+            judge_llm,
+            data_npz_path,
+            settings.max_debug_iters,
+            settings.exec_timeout_s,
         )
 
         if result.success:
@@ -232,7 +279,10 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
                 "debug_iters": result.debug_iters,
             },
         )
-        updated_agents.append(new_agent)
+        in_progress[agent.agent_idx] = new_agent
+        _checkpoint()
+
+    updated_agents = [in_progress[a.agent_idx] for a in state.agents]
 
     g_best_skill, g_best_score = state.g_best_skill, state.g_best_score
     for agent in updated_agents:
@@ -255,12 +305,12 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
         "g_best_skill": g_best_skill,
         "g_best_score": g_best_score,
         "rounds_without_improvement": rounds_without_improvement,
+        "in_progress_agents": {},
     }
 
-    # Single checkpoint file, overwritten every round: always holds exactly the state
-    # as of the last completed round (every agent's velocity/p_best/skill/code, plus
-    # the swarm's global-best) -- this is the only thing a resumed run reads.
-    snapshot_path = settings.runs_dir / state.run_id / "state_snapshot.json"
+    # Single checkpoint file, overwritten after every agent (not just every round):
+    # always holds exactly the state as of the last agent to finish -- this is the only
+    # thing a resumed run reads, whether that's mid-round or a cleanly completed one.
     snapshot_path.write_text(
         state.model_copy(update=updates).model_dump_json(indent=2), encoding="utf-8"
     )
@@ -310,7 +360,11 @@ def _finalize_node(state: SwarmState, settings: Settings) -> dict:
 
     summary = {
         "run_id": state.run_id,
-        "llm": settings.llm_provider + settings.model_name,
+        "llms": {
+            "primary": {"provider": settings.llm_provider, "model": settings.model_name},
+            "judge": {"provider": settings.llm_provider_2, "model": settings.model_name_2},
+            "code": {"provider": settings.llm_provider_3, "model": settings.model_name_3},
+        },
         "stop_reason": stop_reason,
         "rounds_run": state.round,
         "g_best_score": state.g_best_score,

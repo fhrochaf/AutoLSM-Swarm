@@ -13,8 +13,6 @@ import numpy as np
 
 Split = Literal["train", "val", "test"]
 
-# Settings fields, not the class itself -- pydantic model classes don't expose field
-# defaults as plain class attributes, so this must read from an instance.
 settings = Settings()
 SPLIT_SEED = settings.seed
 SPLIT_RATIOS = settings.split_ratios
@@ -85,22 +83,34 @@ def load_split(
     return X, y, ids
 
 
+def load_smoke_sample(dataset_dir: Path, tile_ids: list[int]) -> tuple[np.ndarray, np.ndarray]:
+    """Load pipeline_contract.py's fixed smoke-test tiles (settings.smoke_tile_ids) by id."""
+    imgs, masks = [], []
+    for tile_id in tile_ids:
+        img, mask = _load_tile(dataset_dir, tile_id)
+        imgs.append(img)
+        masks.append(mask)
+    return np.stack(imgs, axis=0), np.stack(masks, axis=0)
+
+
 def build_data_cache(
     dataset_dir: Path,
     cache_path: Path,
     max_train_tiles: int,
     max_val_tiles: int,
+    smoke_tile_ids: list[int],
 ) -> Path:
-    """Build the shared train/val (+2-tile smoke sample) npz reused by every agent and
+    """Build the shared train/val (+fixed smoke sample) npz reused by every agent and
     round in a run, so the dataset is only ever loaded from disk once per run."""
     X_train, y_train, _ = load_split("train", dataset_dir, max_train_tiles)
     X_val, y_val, _ = load_split("val", dataset_dir, max_val_tiles)
+    X_sample, y_sample = load_smoke_sample(dataset_dir, smoke_tile_ids)
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
         cache_path,
-        X_sample=X_train[:2],
-        y_sample=y_train[:2],
+        X_sample=X_sample,
+        y_sample=y_sample,
         X_train=X_train,
         y_train=y_train,
         X_val=X_val,

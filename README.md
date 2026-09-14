@@ -1,3 +1,5 @@
+$${\color{red}Setup config file}$$
+
 # AutoLSM-Swarm
 
 A swarm of LLM agents that search the landslide-mapping literature and evolve their own
@@ -14,10 +16,10 @@ converging on its own pipeline while learning from its peers' results.
 
 ## Methodology
 
-Each agent is a "particle" in AgentPSO's sense, except its **state is not a numeric
-vector but a natural-language `skill.md`** describing an accumulated landslide-mapping
-strategy (grounded in specific cited papers), plus the `pipeline.py` that strategy
-currently compiles to. Every round follows AgentPSO's four-step loop
+Each agent is a "particle" whose **state is not a numeric vector but a natural-language
+`skill.md`** describing an accumulated landslide-mapping strategy (grounded in specific
+cited papers), plus the `pipeline.py` that strategy currently compiles to. Every round
+follows a four-step loop
 ([`src/orchestration/graph.py`](src/orchestration/graph.py),
 [`src/orchestration/peer_review.py`](src/orchestration/peer_review.py)):
 
@@ -27,22 +29,26 @@ currently compiles to. Every round follows AgentPSO's four-step loop
 2. **Peer observation.** Each agent is shown its peers' *code and scores* for the round
    — never their `skill.md` text — so it must infer *why* something worked rather than
    copy another agent's wording.
-3. **Self-reflective update.** Three chained LLM calls replace AgentPSO's numeric
-   velocity update: `Reflect` → `VelocityUpdate` → `SkillUpdate` (rewrite `skill.md`
-   accordingly, then regenerate `pipeline.py` from it). Unlike AgentPSO, `Reflect` is
-   also grounded in the literature corpus every round, not just at initialization: the
-   agent's current approach plus a digest of this round's peer code/scores is used as a
-   vector-search query against the corpus, and the retrieved papers are handed to the
-   `Reflect` call so it can explain a performance gap by citing a specific published
-   technique (`[paper_id]`) instead of guessing — retrieval happens once per agent per
-   round, anchored on the actual code/score gap rather than an already-abstracted
-   reflection. `VelocityUpdate` then merges that grounded reflection with the previous
-   velocity, the agent's own personal-best skill, and the swarm's global-best skill into
-   one set of revision directives.
+3. **Self-reflective update.** Four chained LLM calls replace the numeric velocity
+   update: `Reflect` → `GroundReflection` → `VelocityUpdate` → `SkillUpdate`
+   (rewrite `skill.md` accordingly, then regenerate `pipeline.py` from it). This is also
+   grounded in the literature corpus every round, not just at initialization — but
+   grounding happens in two passes rather than folding retrieval
+   into the same call that forms the hypothesis. `Reflect` first runs without any
+   corpus access, purely on behavior (its own skill vs. peer code/scores), and closes
+   with one explicit `GROUNDING QUERY: ...` line naming the mechanism it's least sure
+   about. That line is parsed out of the response and used, unmodified, as the
+   vector-search query, so retrieval is anchored on the agent's actual open question
+   rather than a raw skill/peer-code dump. `GroundReflection` then reads that draft
+   reflection back together with the retrieved papers and revises it — confirming,
+   sharpening, or contradicting its own hypotheses and citing a specific published
+   technique (`[paper_id]`) where one actually bears on it. Only this finished,
+   grounded reflection reaches `VelocityUpdate`, which merges it with the previous
+   velocity, the agent's own personal-best skill, and the swarm's global-best skill
+   into one set of revision directives.
 4. **Validation-based best tracking.** A new skill only replaces an agent's
    personal-best (or the swarm's global-best) if its Dice score improves on the
-   previous best by more than a margin `p_best_epsilon` — this damps noisy
-   fluctuations, exactly as in AgentPSO's Algorithm 1.
+   previous best by more than a margin `p_best_epsilon`, damping noisy fluctuations.
 
 This project uses a **global-best (fully-connected) topology**: every agent is steered
 toward one swarm-wide best skill each round. Training stops after `n_rounds`, or earlier
@@ -125,15 +131,18 @@ agent's prompt.
   - [`infer.py`](src/eval/infer.py) — runs an agent's `preprocess`/`predict` and scores
     the result against ground truth.
 - **`src/orchestration/`** — the swarm loop itself:
-  - [`state.py`](src/orchestration/state.py) — `AgentState`/`SwarmState`, mirroring
-    AgentPSO's particle bookkeeping (skill, velocity, personal-best, global-best).
+  - [`state.py`](src/orchestration/state.py) — `AgentState`/`SwarmState`: particle-style
+    bookkeeping (skill, velocity, personal-best, global-best).
   - [`peer_review.py`](src/orchestration/peer_review.py) — the
-    `Reflect → VelocityUpdate → SkillUpdate` chain described above, including the
-    per-round corpus retrieval that grounds `Reflect`.
+    `Reflect → GroundReflection → VelocityUpdate → SkillUpdate` chain described above,
+    including the per-round corpus retrieval (queried on `Reflect`'s own
+    `GROUNDING QUERY` line) that `GroundReflection` uses to revise the reflection.
   - [`graph.py`](src/orchestration/graph.py) — the round loop as a LangGraph
     `StateGraph`: retrieval + initial skills at round 0, peer review + pipeline
     regeneration in later rounds, personal-/global-best tracking, plateau-based early
-    stopping, and per-round checkpointing (`state_snapshot.json`) for `--resume`.
+    stopping, and per-agent checkpointing (`state_snapshot.json`, updated as each agent
+    finishes so an interrupted round can resume without rerunning agents already done)
+    for `--resume`.
 
 ## Setup
 

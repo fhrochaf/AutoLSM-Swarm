@@ -47,6 +47,11 @@ class Settings(BaseSettings):
 
     temperature: float = 0.0
 
+    # Retries (exponential backoff+jitter) applied to every LLM call, so a transient
+    # provider error (e.g. Gemini's 503 UNAVAILABLE under high demand) doesn't crash a
+    # whole round.
+    llm_retry_attempts: int = 5
+
     @model_validator(mode="after")
     def _fill_api_key(self) -> "Settings":
         if not self.api_key:

@@ -9,6 +9,7 @@ from langchain_tavily import TavilySearch
 
 from agents.prompts import DATASET_DESCRIPTION, PIPELINE_SYSTEM_PROMPT, SKILL_SYSTEM_PROMPT
 from agents.text_utils import extract_code, strip_optional_fence
+from config import settings
 
 # Cap on search-then-respond round trips inside revise_pipeline_for_fidelity, so an
 # already-expensive debug loop can't be blown up further by an open-ended tool loop.
@@ -25,7 +26,9 @@ Retrieved literature (paper id, methods, datasets, novelty):
 Write your initial skill.md. Keep it concrete and actionable: state the specific
 preprocessing steps, the specific model/architecture choice, and cite which paper id(s)
 each choice comes from."""
-    response = llm.invoke([("system", SKILL_SYSTEM_PROMPT), ("human", prompt)])
+    response = llm.with_retry(stop_after_attempt=settings.llm_retry_attempts).invoke(
+        [("system", SKILL_SYSTEM_PROMPT), ("human", prompt)]
+    )
     # .text handles both plain-string content and content-block lists (e.g. a
     # reasoning model's text+thinking blocks), regardless of provider.
     return strip_optional_fence(response.text)
@@ -39,7 +42,9 @@ Your current skill.md (your strategy for this round):
 {skill_md}
 
 Write pipeline.py implementing this strategy under the fixed contract."""
-    response = llm.invoke([("system", PIPELINE_SYSTEM_PROMPT), ("human", prompt)])
+    response = llm.with_retry(stop_after_attempt=settings.llm_retry_attempts).invoke(
+        [("system", PIPELINE_SYSTEM_PROMPT), ("human", prompt)]
+    )
     return extract_code(response.text)
 
 
@@ -56,7 +61,9 @@ Error:
 
 Fix the module so it satisfies the contract and runs end-to-end without errors. Output \
 ONLY the corrected Python code for pipeline.py, in a single ```python code block."""
-    response = llm.invoke([("system", PIPELINE_SYSTEM_PROMPT), ("human", prompt)])
+    response = llm.with_retry(stop_after_attempt=settings.llm_retry_attempts).invoke(
+        [("system", PIPELINE_SYSTEM_PROMPT), ("human", prompt)]
+    )
     return extract_code(response.text)
 
 
@@ -70,7 +77,9 @@ def revise_pipeline_for_fidelity(
     the actual formula/algorithm for a named technique it's unsure of, instead of
     guessing from parametric memory, targets that specific failure mode."""
     search = TavilySearch(max_results=3)
-    llm_with_tools = llm.bind_tools([search])
+    llm_with_tools = llm.bind_tools([search]).with_retry(
+        stop_after_attempt=settings.llm_retry_attempts
+    )
 
     prompt = f"""\
 Your current skill.md (the strategy this code is supposed to implement):
@@ -101,5 +110,5 @@ corrected Python code for pipeline.py, in a single ```python code block."""
             messages.append(ToolMessage(content=str(result), tool_call_id=call["id"]))
 
     # Still calling tools after _MAX_SEARCH_ITERS -- cut it off and force a plain answer.
-    final = llm.invoke(messages)
+    final = llm.with_retry(stop_after_attempt=settings.llm_retry_attempts).invoke(messages)
     return extract_code(final.text)

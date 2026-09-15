@@ -164,7 +164,9 @@ Your current skill.md:
 
 This round's outputs -- your pipeline.py and score, then each peer's, for comparison:
 {_format_observations(last_code, last_dice, last_iou, neighbourhood)}"""
-    response = llm.invoke([("system", REFLECT_SYSTEM_PROMPT), ("human", prompt)])
+    response = llm.with_retry(stop_after_attempt=settings.llm_retry_attempts).invoke(
+        [("system", REFLECT_SYSTEM_PROMPT), ("human", prompt)]
+    )
     return response.text.strip()
 
 
@@ -175,7 +177,9 @@ Your first-pass reflection this round:
 
 Retrieved literature addressing your flagged open question (paper id, methods, datasets, novelty):
 {grounding}"""
-    response = llm.invoke([("system", ENRICHED_REFLECTION_SYSTEM_PROMPT), ("human", prompt)])
+    response = llm.with_retry(stop_after_attempt=settings.llm_retry_attempts).invoke(
+        [("system", ENRICHED_REFLECTION_SYSTEM_PROMPT), ("human", prompt)]
+    )
     return response.text.strip()
 
 
@@ -202,7 +206,9 @@ Your personal-best skill.md so far:
 
 Swarm global-best skill.md so far:
 {g_best_skill or "(no global-best recorded yet)"}"""
-    response = llm.invoke([("system", VELOCITY_SYSTEM_PROMPT), ("human", prompt)])
+    response = llm.with_retry(stop_after_attempt=settings.llm_retry_attempts).invoke(
+        [("system", VELOCITY_SYSTEM_PROMPT), ("human", prompt)]
+    )
     return response.text.strip()
 
 
@@ -213,7 +219,9 @@ Your current skill.md:
 
 Revision directives (velocity) to apply:
 {velocity}"""
-    response = llm.invoke([("system", SKILL_UPDATE_SYSTEM_PROMPT), ("human", prompt)])
+    response = llm.with_retry(stop_after_attempt=settings.llm_retry_attempts).invoke(
+        [("system", SKILL_UPDATE_SYSTEM_PROMPT), ("human", prompt)]
+    )
     return strip_optional_fence(response.text)
 
 

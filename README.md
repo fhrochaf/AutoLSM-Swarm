@@ -1,4 +1,4 @@
-$${\color{red}Setup config file}$$
+$${\color{red}Not updated}$$
 
 # AutoLSM-Swarm
 

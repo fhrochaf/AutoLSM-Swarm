@@ -1,18 +1,17 @@
 """Prompt template strings for skill authoring and pipeline-script (re)generation."""
 from __future__ import annotations
 
-from agents.pipeline_contract import REQUIRED_FUNCS_DOC
+from agents.pipeline_contract import build_required_funcs_doc
 from config import settings
+from data.registry import get_dataset_spec
 
-DATASET_DESCRIPTION = """\
-Dataset Descriptipon:
-[Each tile is 128x128 pixels with 14 input channels that include:
-- Multispectral data from Sentinel-2: B1, B2, B3, B4, B5, B6, B7, B8, B9, B10, B11, B12.
-- Slope data from ALOS PALSAR: B13.
-- Digital elevation model (DEM) from ALOS PALSAR: B14.
-The label is a binary landslide/no-landslide mask, 128x128, values in {0,1}.
-X arrays are shaped (N,128,128,14) float32; y arrays are shaped (N,128,128) uint8.]
-"""
+# The single source of truth for "what dataset is this run about" -- swap
+# settings.dataset_name to point every prompt/doc-string below at a different
+# DatasetSpec (data/registry.py) without touching this file.
+_DATASET_SPEC = get_dataset_spec(settings.dataset_name)
+
+DATASET_DESCRIPTION = _DATASET_SPEC.description
+REQUIRED_FUNCS_DOC = build_required_funcs_doc(_DATASET_SPEC)
 
 # The corpus-retrieval query for round 0: derived from the dataset itself rather than an
 # assigned niche, so every agent's search is grounded in "how do I map this kind of

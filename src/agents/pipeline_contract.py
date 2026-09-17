@@ -12,6 +12,8 @@ from typing import Any
 
 import numpy as np
 
+from data.spec import DatasetSpec
+
 REQUIRED_FUNCS = ("preprocess", "build_model", "train")
 
 
@@ -97,22 +99,27 @@ def smoke_test(mod: ModuleType, X_sample: np.ndarray, y_sample: np.ndarray) -> A
     return model
 
 
-REQUIRED_FUNCS_DOC = (
-    "preprocess(X: np.ndarray[N,128,128,14]) -> np.ndarray  "
-    "(prepare the raw data however your method needs -- feature engineering, "
-    "data/sensor fusion, band/predictor selection, normalization, a statistical "
-    "transform of the predictors, or a plain pass-through if your method needs none "
-    "of that. Whatever it does, it must be applied identically at train and "
-    "inference time.)\n"
-    "build_model(config: dict | None) -> Any  (return an untrained instance of "
-    "whatever predictive object your method uses -- a trainable classifier/model, a "
-    "statistical model to be fitted, a physically-based or rule-based method with "
-    "parameters to calibrate, etc.)\n"
-    "train(model, X_processed, y: np.ndarray[N,128,128]) -> Any  "
-    "(fit/calibrate the model and return it; must have a non-empty docstring. If "
-    "your method needs no training or calibration -- e.g. a fixed-threshold or "
-    "purely physically-based method -- train() may be a no-op, but the docstring "
-    "must say why.)\n"
-    "Whatever kind of method it is, the returned model must implement "
-    ".predict(X_processed) -> np.ndarray[N,128,128] with binary {0,1} values."
-)
+def build_required_funcs_doc(spec: DatasetSpec) -> str:
+    """The LLM-facing contract doc-string, with this dataset's actual array shapes
+    spliced in. validate_module()/smoke_test() above stay shape-agnostic on purpose --
+    only this prose needs to change per dataset."""
+    return (
+        f"preprocess(X: np.ndarray[{spec.input_shape_doc}]) -> np.ndarray  "
+        "(prepare the raw data however your method needs -- feature engineering, "
+        "data/sensor fusion, band/predictor selection, normalization, a statistical "
+        "transform of the predictors, or a plain pass-through if your method needs none "
+        "of that. Whatever it does, it must be applied identically at train and "
+        "inference time.)\n"
+        "build_model(config: dict | None) -> Any  (return an untrained instance of "
+        "whatever predictive object your method uses -- a trainable classifier/model, a "
+        "statistical model to be fitted, a physically-based or rule-based method with "
+        "parameters to calibrate, etc.)\n"
+        f"train(model, X_processed, y: np.ndarray[{spec.label_shape_doc}]) -> Any  "
+        "(fit/calibrate the model and return it; must have a non-empty docstring. If "
+        "your method needs no training or calibration -- e.g. a fixed-threshold or "
+        "purely physically-based method -- train() may be a no-op, but the docstring "
+        "must say why.)\n"
+        "Whatever kind of method it is, the returned model must implement "
+        f".predict(X_processed) -> np.ndarray[{spec.label_shape_doc}] with binary {{0,1}} "
+        "values."
+    )

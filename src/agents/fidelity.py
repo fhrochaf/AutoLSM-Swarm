@@ -7,8 +7,7 @@ import re
 
 from langchain_core.language_models import BaseChatModel
 
-from agents.pipeline_contract import REQUIRED_FUNCS_DOC
-from agents.prompts import DATASET_DESCRIPTION
+from agents.prompts import DATASET_DESCRIPTION, REQUIRED_FUNCS_DOC
 from config import settings
 
 # Matches the trailing "VERDICT: ..." line the judge is asked to emit.

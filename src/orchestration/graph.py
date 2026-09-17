@@ -33,6 +33,7 @@ from config import Settings
 from corpus.retrieve import format_for_prompt, retrieve_diverse
 from orchestration import peer_review
 from orchestration.state import AgentState, SwarmState
+from utils import git_version
 
 
 def new_run_id() -> str:
@@ -118,7 +119,7 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
         model_provider=settings.llm_provider,
         api_key=settings.api_key or None,
         # temperature=settings.temperature,
-        max_tokens=16000,
+        max_tokens=settings.max_tokens,
     )
 
     judge_llm = init_chat_model(
@@ -126,7 +127,7 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
         model_provider=settings.llm_provider_2,
         api_key=settings.api_key_2 or None,
         # temperature=settings.temperature,
-        max_tokens=2000,
+        max_tokens=settings.max_tokens_2,
     )
 
     # Used only for pipeline.py creation (generate_pipeline/fix_pipeline/
@@ -136,7 +137,7 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
         model_provider=settings.llm_provider_3,
         api_key=settings.api_key_3 or None,
         # temperature=settings.temperature,
-        max_tokens=16000,
+        max_tokens=settings.max_tokens_3,
     )
     round_idx = state.round
     data_npz_path = Path(state.data_npz_path)
@@ -360,6 +361,7 @@ def _finalize_node(state: SwarmState, settings: Settings) -> dict:
 
     summary = {
         "run_id": state.run_id,
+        "git": git_version(),
         "llms": {
             "primary": {"provider": settings.llm_provider, "model": settings.model_name},
             "judge": {"provider": settings.llm_provider_2, "model": settings.model_name_2},

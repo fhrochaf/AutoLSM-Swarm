@@ -42,4 +42,5 @@ notebook = [
     "matplotlib>=3.11.1",
     "nbconvert>=7.17.1",
     "pandas>=3.0.5",
+    "umap-learn>=0.5.12",
 ]

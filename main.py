@@ -95,11 +95,11 @@ def main(argv: list[str] | None = None) -> None:
 
         # Loading dataset to cache
         build_data_cache(
+            settings.dataset_name,
             settings.dataset_dir,
             data_npz_path,
             settings.max_train_tiles,
             settings.max_val_tiles,
-            settings.smoke_tile_ids,
         )
 
         state = create_initial_state(settings, run_id, data_npz_path)

@@ -17,11 +17,11 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=REPO_ROOT / ".env", extra="ignore")
 
     # Any provider LangChain's init_chat_model supports (anthropic, openai, ollama,
-    # google_genai, ...). Only "anthropic" is installed by default right now -- add the
-    # matching langchain-<provider> package to switch.
+    # google_genai, ...).
     llm_provider: str = "anthropic"
     model_name: str = "claude-sonnet-5"
     api_key: str = ""
+    max_tokens: int = 32000
 
     # llm_provider: str = "google_genai"
     # model_name: str = "gemini-3.1-flash-lite"
@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     llm_provider_2: str = "google_genai"
     model_name_2: str = "gemini-3.1-flash-lite"
     api_key_2: str = ""
+    max_tokens_2: int = 2000
 
     ################################
     # Used only for pipeline.py creation (agents/codegen.py's generate_pipeline,
@@ -44,12 +45,12 @@ class Settings(BaseSettings):
     llm_provider_3: str = "anthropic"
     model_name_3: str = "claude-sonnet-5"
     api_key_3: str = ""
+    max_tokens_3: int = 32000
 
     temperature: float = 0.0
 
     # Retries (exponential backoff+jitter) applied to every LLM call, so a transient
-    # provider error (e.g. Gemini's 503 UNAVAILABLE under high demand) doesn't crash a
-    # whole round.
+    # provider error doesn't crash a whole round.
     llm_retry_attempts: int = 5
 
     @model_validator(mode="after")
@@ -65,12 +66,15 @@ class Settings(BaseSettings):
     n_agents: int = 2
     n_rounds: int = 2
     # Stop early if the swarm's global-best Dice hasn't improved by more than
-    # p_best_epsilon for this many consecutive rounds (implementation_steps.md's
-    # "stop ... once dice plateaus across the population").
+    # p_best_epsilon for this many consecutive rounds.
     plateau_patience: int = 3
 
+    # Selects a DatasetSpec from data/registry.py -- everything dataset-specific
+    # (description text, array shapes, loading logic, smoke-test tile ids) flows from
+    # this one name; see data/spec.py.
+    dataset_name: str = "landslide4sense"
     dataset_dir: Path = REPO_ROOT / "archive"
-    runs_dir: Path = REPO_ROOT / "runs"
+    runs_dir: Path = REPO_ROOT / "runs_landslide4sense"
 
     corpus_json_dir: Path = Path(
         r"D:\Flávio Rocha USER\OneDrive\University of Twente\MSc 2025-2027"
@@ -97,14 +101,11 @@ class Settings(BaseSettings):
     max_val_tiles: int = 50
     max_debug_iters: int = 5
 
-    # Fixed tile ids (from the train split) used for pipeline_contract.py's smoke_test,
-    # Verified once against the dataset with seed=42: 1, 4 have at least one landslide pixel; 8, 10 have none.
-    smoke_tile_ids: list[int] = [1, 4, 8, 10]
     # Budget for one driver.py subprocess call: package auto-install (agents can now
     # import any library, e.g. torch) + train + evaluate, combined. Was 300s when only
     # numpy/scikit-learn were allowed; widened since a first-time heavy install alone
     # (e.g. torch) can take several minutes.
-    exec_timeout_s: int = 1800
+    exec_timeout_s: int = 3600
 
     # Margin: a new score only replaces personal-best /
     # global-best if it improves by more than this, to ignore noisy fluctuations.

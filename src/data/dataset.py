@@ -1,43 +1,37 @@
-"""Fixed train/val/test split + loading for the labeled landslide tiles.
-We carve our own train/val/test split out of the labeled tiles, once, with a fixed seed.
+"""Dataset-agnostic entry points: dispatch to the active dataset's DatasetSpec
+(config.settings.dataset_name, looked up in data/registry.py) plus the one bit of
+splitting logic every id-indexed dataset shares.
+
+Per-dataset loading logic (file layout, formats, id schemes) lives under
+data/datasets/ -- this module never hardcodes any of that.
 """
 from __future__ import annotations
 
 import random
 from pathlib import Path
-from typing import Literal
-from config import Settings
 
-import h5py
 import numpy as np
 
-Split = Literal["train", "val", "test"]
-
-settings = Settings()
-SPLIT_SEED = settings.seed
-SPLIT_RATIOS = settings.split_ratios
+from config import settings
+from data.spec import Split
 
 
-def _labeled_ids(dataset_dir: Path) -> list[int]:
-    img_dir = dataset_dir / "TrainData" / "img"
-    mask_dir = dataset_dir / "TrainData" / "mask"
-    ids = []
-    for p in img_dir.glob("image_*.h5"):
-        tile_id = int(p.stem.split("_")[1])
-        if (mask_dir / f"mask_{tile_id}.h5").exists():
-            ids.append(tile_id)
-    return sorted(ids)
+def split_ids_by_ratio(
+    ids: list[int], seed: int, ratios: dict[str, float]
+) -> dict[Split, list[int]]:
+    """Deterministically shuffle `ids` and carve train/val/test out by `ratios`.
 
-
-def _split_ids(dataset_dir: Path) -> dict[Split, list[int]]:
-    ids = _labeled_ids(dataset_dir)
-    rng = random.Random(SPLIT_SEED)
+    Shared by any id-indexed dataset loader (data/datasets/*.py) that needs a fixed,
+    reproducible split -- the shuffle/cut logic is generic, only the id list itself is
+    dataset-specific.
+    """
+    rng = random.Random(seed)
     shuffled = ids[:]
     rng.shuffle(shuffled)
 
     n = len(shuffled)
-    n_train = int(n * SPLIT_RATIOS["train"])
-    n_val = int(n * SPLIT_RATIOS["val"])
+    n_train = int(n * ratios["train"])
+    n_val = int(n * ratios["val"])
 
     return {
         "train": sorted(shuffled[:n_train]),
@@ -46,65 +40,51 @@ def _split_ids(dataset_dir: Path) -> dict[Split, list[int]]:
     }
 
 
-def _load_tile(dataset_dir: Path, tile_id: int) -> tuple[np.ndarray, np.ndarray]:
-    img_path = dataset_dir / "TrainData" / "img" / f"image_{tile_id}.h5"
-    mask_path = dataset_dir / "TrainData" / "mask" / f"mask_{tile_id}.h5"
-    with h5py.File(img_path, "r") as f:
-        img = f["img"][...].astype(np.float32)
-    with h5py.File(mask_path, "r") as f:
-        mask = f["mask"][...].astype(np.uint8)
-    return img, mask
-
-
 def load_split(
     split: Split,
     dataset_dir: Path,
     max_tiles: int | None = None,
+    dataset_name: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[int]]:
-    """Load a fixed split as stacked arrays.
+    """Load a fixed split as stacked arrays for the active (or given) dataset."""
+    from data.registry import get_dataset_spec
 
-    Returns (X, y, ids): X is (N,128,128,14) float32, y is (N,128,128) uint8.
-    max_tiles caps N for a cheap-proxy subset (e.g. to screen a round's candidate
-    pipelines cheaply); the ids are always the first `max_tiles` of the full,
-    seed-fixed split so the same subset is reused across agents and rounds.
-    """
-    ids = _split_ids(dataset_dir)[split]
-    if max_tiles is not None:
-        ids = ids[:max_tiles]
-
-    imgs, masks = [], []
-    for tile_id in ids:
-        img, mask = _load_tile(dataset_dir, tile_id)
-        imgs.append(img)
-        masks.append(mask)
-
-    X = np.stack(imgs, axis=0)
-    y = np.stack(masks, axis=0)
-    return X, y, ids
+    spec = get_dataset_spec(dataset_name or settings.dataset_name)
+    return spec.load_split(split, dataset_dir, max_tiles)
 
 
-def load_smoke_sample(dataset_dir: Path, tile_ids: list[int]) -> tuple[np.ndarray, np.ndarray]:
-    """Load pipeline_contract.py's fixed smoke-test tiles (settings.smoke_tile_ids) by id."""
-    imgs, masks = [], []
-    for tile_id in tile_ids:
-        img, mask = _load_tile(dataset_dir, tile_id)
-        imgs.append(img)
-        masks.append(mask)
-    return np.stack(imgs, axis=0), np.stack(masks, axis=0)
+def load_smoke_sample(
+    dataset_dir: Path, tile_ids: list[int], dataset_name: str | None = None
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load the fixed smoke-test tiles (by id) for the active (or given) dataset."""
+    from data.registry import get_dataset_spec
+
+    spec = get_dataset_spec(dataset_name or settings.dataset_name)
+    return spec.load_smoke_sample(dataset_dir, tile_ids)
 
 
 def build_data_cache(
+    dataset_name: str,
     dataset_dir: Path,
     cache_path: Path,
     max_train_tiles: int,
     max_val_tiles: int,
-    smoke_tile_ids: list[int],
+    smoke_tile_ids: list[int] | None = None,
 ) -> Path:
     """Build the shared train/val (+fixed smoke sample) npz reused by every agent and
-    round in a run, so the dataset is only ever loaded from disk once per run."""
-    X_train, y_train, _ = load_split("train", dataset_dir, max_train_tiles)
-    X_val, y_val, _ = load_split("val", dataset_dir, max_val_tiles)
-    X_sample, y_sample = load_smoke_sample(dataset_dir, smoke_tile_ids)
+    round in a run, so the dataset is only ever loaded from disk once per run.
+
+    smoke_tile_ids defaults to the dataset's own DatasetSpec.smoke_tile_ids; pass it
+    explicitly only to override.
+    """
+    from data.registry import get_dataset_spec
+
+    spec = get_dataset_spec(dataset_name)
+    tile_ids = smoke_tile_ids if smoke_tile_ids is not None else spec.smoke_tile_ids
+
+    X_train, y_train, _ = spec.load_split("train", dataset_dir, max_train_tiles)
+    X_val, y_val, _ = spec.load_split("val", dataset_dir, max_val_tiles)
+    X_sample, y_sample = spec.load_smoke_sample(dataset_dir, tile_ids)
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(

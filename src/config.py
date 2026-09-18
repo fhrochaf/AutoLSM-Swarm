@@ -18,8 +18,8 @@ class Settings(BaseSettings):
 
     # Any provider LangChain's init_chat_model supports (anthropic, openai, ollama,
     # google_genai, ...).
-    llm_provider: str = "anthropic"
-    model_name: str = "claude-sonnet-5"
+    llm_provider: str = "google_genai"
+    model_name: str = "gemini-3.1-flash-lite"
     api_key: str = ""
     max_tokens: int = 32000
 

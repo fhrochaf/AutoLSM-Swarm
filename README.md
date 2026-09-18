@@ -1,5 +1,3 @@
-$${\color{red}Setup config file}$$
-
 # AutoLSM-Swarm
 
 A swarm of LLM agents that search the landslide-mapping literature and evolve their own

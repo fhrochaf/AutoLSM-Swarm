@@ -17,34 +17,64 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=REPO_ROOT / ".env", extra="ignore")
 
     # Any provider LangChain's init_chat_model supports (anthropic, openai, ollama,
-    # google_genai, ...). Only "anthropic" is installed by default right now -- add the
-    # matching langchain-<provider> package to switch.
-    # llm_provider: str = "anthropic"
-    # model_name: str = "claude-sonnet-5"
-
+    # google_genai, ...).
     llm_provider: str = "google_genai"
     model_name: str = "gemini-3.1-flash-lite"
-
-    # Loaded from .env. Set API_KEY directly to override, otherwise falls back to the
-    # provider's own convention, e.g. ANTHROPIC_API_KEY / OPENAI_API_KEY.
     api_key: str = ""
+    max_tokens: int = 32000
+
+    # llm_provider: str = "google_genai"
+    # model_name: str = "gemini-3.1-flash-lite"
+
+    # llm_provider: str = "deepsee  k"
+    # model_name: str = "deepseek-v4-pro"
+
+    ################################
+    # Used only for judgement between the declarations in the skill.md and the elaborated code in pipeline.py
+    # llm_provider_2: str = "ollama"
+    # model_name_2: str = "qwen3"
+
+    llm_provider_2: str = "google_genai"
+    model_name_2: str = "gemini-3.1-flash-lite"
+    api_key_2: str = ""
+    max_tokens_2: int = 2000
+
+    ################################
+    # Used only for pipeline.py creation (agents/codegen.py's generate_pipeline,
+    # fix_pipeline, revise_pipeline_for_fidelity)
+    llm_provider_3: str = "anthropic"
+    model_name_3: str = "claude-sonnet-5"
+    api_key_3: str = ""
+    max_tokens_3: int = 32000
+
     temperature: float = 0.0
+
+    # Retries (exponential backoff+jitter) applied to every LLM call, so a transient
+    # provider error doesn't crash a whole round.
+    llm_retry_attempts: int = 5
 
     @model_validator(mode="after")
     def _fill_api_key(self) -> "Settings":
         if not self.api_key:
             self.api_key = os.environ.get(f"{self.llm_provider.upper()}_API_KEY", "")
+        if not self.api_key_2:
+            self.api_key_2 = os.environ.get(f"{self.llm_provider_2.upper()}_API_KEY", "")
+        if not self.api_key_3:
+            self.api_key_3 = os.environ.get(f"{self.llm_provider_3.upper()}_API_KEY", "")
         return self
 
-    n_agents: int = 3
-    n_rounds: int = 5
+    n_agents: int = 2
+    n_rounds: int = 2
     # Stop early if the swarm's global-best Dice hasn't improved by more than
-    # p_best_epsilon for this many consecutive rounds (implementation_steps.md's
-    # "stop ... once dice plateaus across the population").
+    # p_best_epsilon for this many consecutive rounds.
     plateau_patience: int = 3
 
+    # Selects a DatasetSpec from data/registry.py -- everything dataset-specific
+    # (description text, array shapes, loading logic, smoke-test tile ids) flows from
+    # this one name; see data/spec.py.
+    dataset_name: str = "landslide4sense"
     dataset_dir: Path = REPO_ROOT / "archive"
-    runs_dir: Path = REPO_ROOT / "runs"
+    runs_dir: Path = REPO_ROOT / "runs_landslide4sense"
 
     corpus_json_dir: Path = Path(
         r"D:\Flávio Rocha USER\OneDrive\University of Twente\MSc 2025-2027"
@@ -59,7 +89,7 @@ class Settings(BaseSettings):
     )
     pdf_text_cache_dir: Path = REPO_ROOT / "database_vector_store" / "pdf_text_cache"
     # Per-paper cap when a full-text excerpt is stuffed into a prompt (~2k tokens).
-    full_text_char_cap: int = 8000
+    full_text_char_cap: int = 80000
     vector_store_dir: Path = REPO_ROOT / "database_vector_store" / "vector_store"
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     retrieval_k: int = 3
@@ -67,16 +97,17 @@ class Settings(BaseSettings):
     split_ratios: dict[str, float] = {"train": 0.7, "val": 0.15, "test": 0.15}
     seed: int = 42
     
-    max_train_tiles: int = 200
-    max_val_tiles: int = 100
+    max_train_tiles: int = 100
+    max_val_tiles: int = 50
     max_debug_iters: int = 5
+
     # Budget for one driver.py subprocess call: package auto-install (agents can now
     # import any library, e.g. torch) + train + evaluate, combined. Was 300s when only
     # numpy/scikit-learn were allowed; widened since a first-time heavy install alone
     # (e.g. torch) can take several minutes.
-    exec_timeout_s: int = 1800
+    exec_timeout_s: int = 3600
 
-    # AgentPSO Algorithm 1's margin: a new score only replaces personal-best /
+    # Margin: a new score only replaces personal-best /
     # global-best if it improves by more than this, to ignore noisy fluctuations.
     p_best_epsilon: float = 0.01
 

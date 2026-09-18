@@ -11,7 +11,8 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from agents import skill
-from agents.codegen import fix_pipeline
+from agents.codegen import fix_pipeline, revise_pipeline_for_fidelity
+from agents.fidelity import check_fidelity
 from langchain_core.language_models import BaseChatModel
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -53,8 +54,10 @@ def _run_once(pipeline_path: Path, data_npz_path: Path, timeout_s: int) -> dict:
 
 def run_agent_round(
     agent_dir: Path,
+    skill_md: str,
     initial_code: str,
-    llm: BaseChatModel,
+    code_llm: BaseChatModel,
+    judge_llm: BaseChatModel,
     data_npz_path: Path,
     max_debug_iters: int,
     timeout_s: int,
@@ -64,6 +67,21 @@ def run_agent_round(
     attempts: list[dict] = []
 
     for attempt in range(max_debug_iters + 1):
+        faithful, feedback = check_fidelity(judge_llm, skill_md, code)
+        if not faithful:
+            attempts.append(
+                {
+                    "attempt": attempt,
+                    "status": "error",
+                    "error": "fidelity check failed: pipeline.py does not faithfully implement skill.md",
+                    "traceback": feedback,
+                }
+            )
+            if attempt == max_debug_iters:
+                break
+            code = revise_pipeline_for_fidelity(code_llm, skill_md, code, feedback)
+            continue
+
         pipeline_path = skill.write_pipeline(agent_dir, code)
         result = _run_once(pipeline_path, data_npz_path, timeout_s)
         attempts.append({"attempt": attempt, **result})
@@ -87,7 +105,7 @@ def run_agent_round(
         error_message = result.get("error", "unknown error")
         if result.get("traceback"):
             error_message = f"{error_message}\n{result['traceback']}"
-        code = fix_pipeline(llm, code, error_message)
+        code = fix_pipeline(code_llm, code, error_message)
 
     (agent_dir / "driver_stdout.json").write_text(
         json.dumps(attempts, indent=2), encoding="utf-8"

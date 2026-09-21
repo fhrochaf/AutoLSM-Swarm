@@ -12,6 +12,8 @@ for a given dataset does not scale — only ~20% of papers on the topic even rel
 population of agents searches the published methodology space in parallel, each
 converging on its own pipeline while learning from its peers' results.
 
+![alt text](diagram.png)
+
 ## Methodology
 
 Each agent is a "particle" whose **state is not a numeric vector but a natural-language

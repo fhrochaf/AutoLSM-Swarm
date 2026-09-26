@@ -15,6 +15,7 @@ the schema type, not a model instance.
 from __future__ import annotations
 
 import json
+import random
 import shutil
 import time
 from pathlib import Path
@@ -169,8 +170,17 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
         tqdm.write(f"round {round_idx}: retrieving literature from the corpus for {len(state.agents)} agent(s)...")
         agent_docs = retrieve_diverse(RETRIEVAL_QUERY, settings, len(state.agents))
 
+    # Fixed random subset of agents that always get an enriched reflection. Seeded from
+    # settings.seed so the same agents are picked every round (and after a resume).
+    n_random_enriched = 0
+    if settings.random_enriched_reflection > 0:
+        n_random_enriched = max(1, round(settings.random_enriched_reflection * len(state.agents)))
+    random_enriched_agents = set(
+        random.Random(settings.seed).sample([a.agent_idx for a in state.agents], min(n_random_enriched, len(state.agents)))
+    )
+
     for agent in agent_bar:
-        tag = f"[round {round_idx} | agent {agent.agent_idx}]"
+        tag =f"[round {round_idx} | agent {agent.agent_idx}]"
         agent_bar.set_postfix_str(f"agent {agent.agent_idx}")
         agent_dir = skill_io.agent_round_dir(
             settings.runs_dir, state.run_id, round_idx, agent.agent_idx
@@ -184,13 +194,18 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
             skill_changed = True
             retrieved_papers = [d.metadata.get("paper_id", "unknown") for d in docs]
         else:
+            enriched_reflection = (
+                settings.enriched_reflection_all
+                or agent.last_dice == state.g_best_score
+                or agent.agent_idx in random_enriched_agents
+            )
             # Later rounds: peer review (Reflect -> VelocityUpdate -> SkillUpdate)
             # decides whether/how the skill changes -- see peer_review.py. Reflect is
             # grounded in a fresh corpus retrieval every round, not just round 0.
             neighbourhood = [a for a in state.agents if a.agent_idx != agent.agent_idx]
             tqdm.write(f"{tag} peer review: reflecting against {len(neighbourhood)} peer(s)...")
             skill_md, velocity, skill_changed, retrieved_papers = peer_review.reflect_and_update(
-                llm, agent, neighbourhood, state.g_best_skill, settings
+                llm, agent, neighbourhood, state.g_best_skill, settings, enriched_reflection
             )
 
         cited_papers = peer_review.extract_cited_papers(skill_md)

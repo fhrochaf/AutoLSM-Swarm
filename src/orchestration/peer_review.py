@@ -61,16 +61,18 @@ def extract_cited_papers(text: str) -> list[str]:
             seen.append(match)
     return seen
 
-REFLECT_SYSTEM_PROMPT = """\
+REFLECT_SYSTEM_PROMPT =f"""\
 You are a research agent developing a landslide detection/mapping pipeline. Below: your \
 skill.md, then your pipeline.py + score this round, then each peer's pipeline.py + score.
 
 Instruction:
 - Compare your code to each peer's, mechanism by mechanism -- not "peer X scored higher, \
 adopt peer X", but WHY a specific technique likely helped or hurt, so the lesson generalizes.
-- If your code already does something better than every peer's, say so -- not one-directional.
-- Do not overfit to this one round/dataset split; do not rewrite skill.md or code.
-- Return only the update direction (a few bullet points), then end with exactly one line:
+- If your code already does something better than every peer's, say so.
+- Return only a few bullet points describing to which direction your skill.md should be updated
+to achieve beter score."""
+
+REFLECT_SYSTEM_PROMPT_2 =f"""\Then end with exactly one line:
 GROUNDING QUERY: <a concrete question a literature search should resolve>"""
 
 ENRICHED_REFLECTION_SYSTEM_PROMPT = """\
@@ -157,6 +159,7 @@ def reflect(
     last_dice: float | None,
     last_iou: float | None,
     neighbourhood: list[AgentState],
+    enriched_reflection: bool = False
 ) -> str:
     prompt = f"""\
 Your current skill.md:
@@ -164,8 +167,11 @@ Your current skill.md:
 
 This round's outputs -- your pipeline.py and score, then each peer's, for comparison:
 {_format_observations(last_code, last_dice, last_iou, neighbourhood)}"""
+
+    reflect_system_promt = f"{REFLECT_SYSTEM_PROMPT} {REFLECT_SYSTEM_PROMPT_2 if enriched_reflection else ""}"
+
     response = llm.with_retry(stop_after_attempt=settings.llm_retry_attempts).invoke(
-        [("system", REFLECT_SYSTEM_PROMPT), ("human", prompt)]
+        [("system", reflect_system_promt), ("human", prompt)]
     )
     return response.text.strip()
 
@@ -231,6 +237,7 @@ def reflect_and_update(
     neighbourhood: list[AgentState],
     g_best_skill: str | None,
     settings: Settings,
+    enriched_reflection: bool = False,
 ) -> tuple[str, str, bool, list[str]]:
     """Run Reflect -> GroundReflection -> VelocityUpdate -> SkillUpdate. Returns
     (new_skill_md, new_velocity, changed, retrieved_paper_ids). changed=False (and
@@ -238,14 +245,14 @@ def reflect_and_update(
     if not neighbourhood:
         return agent.skill_md, agent.velocity, False, []
 
-    draft = reflect(llm, agent.skill_md, agent.last_code, agent.last_dice, agent.last_iou, neighbourhood)
-    draft_body, query = extract_grounding_query(draft)
+    reflection = reflect(llm, agent.skill_md, agent.last_code, agent.last_dice, agent.last_iou, neighbourhood, enriched_reflection)
+    if enriched_reflection:
+        draft, query = extract_grounding_query(reflection)
+        docs = retrieve(query, settings)
+        grounding = format_for_prompt(docs, settings)
+        reflection = enrich_reflection(llm, draft, grounding)
 
-    docs = retrieve(query, settings)
-    grounding = format_for_prompt(docs, settings)
-    retrieved_paper_ids = [d.metadata.get("paper_id", "unknown") for d in docs]
-
-    reflection = enrich_reflection(llm, draft_body, grounding)
+    retrieved_paper_ids = [d.metadata.get("paper_id", "unknown") for d in (docs or [])]
     v = velocity_update(llm, agent.velocity, reflection, agent.skill_md, agent.p_best_skill, g_best_skill)
     s = skill_update(llm, agent.skill_md, v)
     return s, v, True, retrieved_paper_ids

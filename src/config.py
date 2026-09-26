@@ -111,5 +111,11 @@ class Settings(BaseSettings):
     # global-best if it improves by more than this, to ignore noisy fluctuations.
     p_best_epsilon: float = 0.01
 
+    # Enrich reflection: If True, all agents will update their reflections after each round based, aditionally on their peer's reflections, on
+    # on retrieved context over the corpus via RAG and a query extracted for the initial reflection
+    enriched_reflection_all: bool = False
+    # If > 0.0, random enriched reflection will assign enriched reflections through CORPUS retrieval to a fraction of the agents
+    random_enriched_reflection: float = 0.0
+
 
 settings = Settings()

@@ -63,14 +63,16 @@ def extract_cited_papers(text: str) -> list[str]:
 
 REFLECT_SYSTEM_PROMPT =f"""\
 You are a research agent developing a landslide detection/mapping pipeline. Below: your \
-skill.md, then your pipeline.py + score this round, then each peer's pipeline.py + score.
+skill.md (which describes the strategy to implement code for the mapping pipeline),
+then your pipeline.py (generated after that strategy) + score this round,
+then each peer's pipeline.py + score.
 
 Instruction:
 - Compare your code to each peer's, mechanism by mechanism -- not "peer X scored higher, \
 adopt peer X", but WHY a specific technique likely helped or hurt, so the lesson generalizes.
 - If your code already does something better than every peer's, say so.
 - Return only a few bullet points describing to which direction your skill.md should be updated
-to achieve beter score."""
+to achieve a better score."""
 
 REFLECT_SYSTEM_PROMPT_2 =f"""\Then end with exactly one line:
 GROUNDING QUERY: <a concrete question a literature search should resolve>"""
@@ -246,13 +248,14 @@ def reflect_and_update(
         return agent.skill_md, agent.velocity, False, []
 
     reflection = reflect(llm, agent.skill_md, agent.last_code, agent.last_dice, agent.last_iou, neighbourhood, enriched_reflection)
+    docs = []
     if enriched_reflection:
         draft, query = extract_grounding_query(reflection)
         docs = retrieve(query, settings)
         grounding = format_for_prompt(docs, settings)
         reflection = enrich_reflection(llm, draft, grounding)
 
-    retrieved_paper_ids = [d.metadata.get("paper_id", "unknown") for d in (docs or [])]
+    retrieved_paper_ids = [d.metadata.get("paper_id", "unknown") for d in docs]
     v = velocity_update(llm, agent.velocity, reflection, agent.skill_md, agent.p_best_skill, g_best_skill)
     s = skill_update(llm, agent.skill_md, v)
     return s, v, True, retrieved_paper_ids

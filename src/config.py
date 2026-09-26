@@ -63,11 +63,11 @@ class Settings(BaseSettings):
             self.api_key_3 = os.environ.get(f"{self.llm_provider_3.upper()}_API_KEY", "")
         return self
 
-    n_agents: int = 2
-    n_rounds: int = 2
+    n_agents: int = 5
+    n_rounds: int = 5
     # Stop early if the swarm's global-best Dice hasn't improved by more than
     # p_best_epsilon for this many consecutive rounds.
-    plateau_patience: int = 3
+    plateau_patience: int = 4
 
     # Selects a DatasetSpec from data/registry.py -- everything dataset-specific
     # (description text, array shapes, loading logic, smoke-test tile ids) flows from
@@ -76,16 +76,14 @@ class Settings(BaseSettings):
     dataset_dir: Path = REPO_ROOT / "archive"
     runs_dir: Path = REPO_ROOT / "runs_landslide4sense"
 
-    corpus_json_dir: Path = Path(
-        r"D:\Flávio Rocha USER\OneDrive\University of Twente\MSc 2025-2027"
-        r"\Thesis_LAReprod\LSM_ReproChecker\output_fullPDF_with_guardrails_singlePDFread"
+    corpus_json_dir: Path =  Path(
+        "/mnt/pool/landslide/AutoLSM-Swarm/AutoLSM-Swarm/output_fullPDF_with_guardrails_singlePDFread"
     )
     # The actual paper PDFs -- same paper_id stems as corpus_json_dir's *.json files.
     # The JSON summaries are a cheap pre-filter; retrieval hydrates the top matches
     # with an excerpt of the real full text from here (see corpus/pdf_extract.py).
     publications_dir: Path = Path(
-        r"D:\Flávio Rocha USER\OneDrive\University of Twente\MSc 2025-2027"
-        r"\Thesis_LAReprod\LSM_ReproChecker\publications"
+        "/mnt/pool/landslide/LSM_ReproChecker/publications"
     )
     pdf_text_cache_dir: Path = REPO_ROOT / "database_vector_store" / "pdf_text_cache"
     # Per-paper cap when a full-text excerpt is stuffed into a prompt (~2k tokens).
@@ -116,6 +114,10 @@ class Settings(BaseSettings):
     enriched_reflection_all: bool = False
     # If > 0.0, random enriched reflection will assign enriched reflections through CORPUS retrieval to a fraction of the agents
     random_enriched_reflection: float = 0.0
+
+    # How many past velocities (with the Dice before/after applying each) the velocity
+    # update sees as a "recent trajectory". 0 disables it.
+    velocity_history_len: int = 2
 
 
 settings = Settings()

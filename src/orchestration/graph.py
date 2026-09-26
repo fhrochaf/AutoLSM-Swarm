@@ -191,6 +191,7 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
             tqdm.write(f"{tag} retrieved {len(docs)} paper(s); writing initial skill.md...")
             skill_md = write_skill(llm, format_for_prompt(docs, settings))
             velocity = agent.velocity
+            velocity_history = agent.velocity_history
             skill_changed = True
             retrieved_papers = [d.metadata.get("paper_id", "unknown") for d in docs]
         else:
@@ -204,7 +205,7 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
             # grounded in a fresh corpus retrieval every round, not just round 0.
             neighbourhood = [a for a in state.agents if a.agent_idx != agent.agent_idx]
             tqdm.write(f"{tag} peer review: reflecting against {len(neighbourhood)} peer(s)...")
-            skill_md, velocity, skill_changed, retrieved_papers = peer_review.reflect_and_update(
+            skill_md, velocity, skill_changed, retrieved_papers, velocity_history = peer_review.reflect_and_update(
                 llm, agent, neighbourhood, state.g_best_skill, settings, enriched_reflection
             )
 
@@ -267,6 +268,7 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
             update={
                 "skill_md": skill_md,
                 "velocity": velocity,
+                "velocity_history": velocity_history,
                 "last_dice": result.dice,
                 "last_iou": result.iou,
                 "last_code": result.final_code if result.success else "",

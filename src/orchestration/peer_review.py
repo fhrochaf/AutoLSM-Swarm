@@ -33,10 +33,11 @@ import re
 
 from langchain_core.language_models import BaseChatModel
 
+from agents.prompts import DATASET_DESCRIPTION
 from agents.text_utils import strip_optional_fence
 from config import Settings
 from corpus.retrieve import format_for_prompt, retrieve
-from orchestration.state import AgentState
+from orchestration.state import AgentState, VelocityRecord
 
 settings = Settings()
 
@@ -74,7 +75,8 @@ adopt peer X", but WHY a specific technique likely helped or hurt, so the lesson
 - Return only a few bullet points describing to which direction your skill.md should be updated
 to achieve a better score."""
 
-REFLECT_SYSTEM_PROMPT_2 =f"""\Then end with exactly one line:
+REFLECT_SYSTEM_PROMPT_2 = """\
+Then end with exactly one line:
 GROUNDING QUERY: <a concrete question a literature search should resolve>"""
 
 ENRICHED_REFLECTION_SYSTEM_PROMPT = """\
@@ -97,16 +99,22 @@ plan, not code, and no GROUNDING QUERY line this time; that step is done."""
 VELOCITY_SYSTEM_PROMPT = """\
 You maintain one landslide-mapping research agent's "semantic velocity": directives for \
 how its skill.md -- the strategy of how to elaborate a pipeline.py script desgined to map landslides -- should evolve. \
-Below: the previous velocity, this round's self-reflective direction, your current skill, \
+Below: the previous velocity, the recent trajectory (past velocities and the score change \
+each one produced), this round's self-reflective direction, your current skill, \
 your personal-best skill, the global-best skill.
 
 Instruction:
+- Use the recent trajectory as momentum: keep pushing in a direction that raised the score, \
+and back off or change course where it lowered it or the run failed. Small score changes \
+(under ~0.01 Dice) may be noise, not evidence -- do not over-credit or over-blame a \
+directive for them.
+- Begin the velocity with one line "FROM: <style of the current skill> -> TO: <where the \
+skill is being pushed>", then the directives.
 - Combine the previous velocity, the fresh direction, and lessons from the personal-best \
 and global-best skills.
 - Focus on generalizable improvements, not one-off fixes.
 - Do not copy the personal-best or global-best skill directly.
-- Do not just converge it into a copy of another agent.
-- Return a concise natural-language velocity."""
+- Do not just converge it into a copy of another agent."""
 
 SKILL_UPDATE_SYSTEM_PROMPT = """\
 You rewrite a research agent's skill.md -- its durable, accumulated strategy for a \
@@ -164,13 +172,17 @@ def reflect(
     enriched_reflection: bool = False
 ) -> str:
     prompt = f"""\
+{DATASET_DESCRIPTION}
+
 Your current skill.md:
 {skill_md}
 
 This round's outputs -- your pipeline.py and score, then each peer's, for comparison:
 {_format_observations(last_code, last_dice, last_iou, neighbourhood)}"""
 
-    reflect_system_promt = f"{REFLECT_SYSTEM_PROMPT} {REFLECT_SYSTEM_PROMPT_2 if enriched_reflection else ""}"
+    reflect_system_promt = REFLECT_SYSTEM_PROMPT
+    if enriched_reflection:
+        reflect_system_promt = f"{REFLECT_SYSTEM_PROMPT}\n{REFLECT_SYSTEM_PROMPT_2}"
 
     response = llm.with_retry(stop_after_attempt=settings.llm_retry_attempts).invoke(
         [("system", reflect_system_promt), ("human", prompt)]
@@ -191,6 +203,24 @@ Retrieved literature addressing your flagged open question (paper id, methods, d
     return response.text.strip()
 
 
+def _format_trajectory(history: list[VelocityRecord]) -> str:
+    if not history:
+        return "(no earlier velocities yet)"
+    lines = []
+    for rec in history:
+        before = _format_score(rec.dice_before)
+        if not rec.outcome_recorded:
+            outcome = "outcome not yet known"
+        elif rec.dice_after is None:
+            outcome = "the resulting run FAILED"
+        elif rec.dice_before is None:
+            outcome = f"resulting Dice={rec.dice_after:.4f}"
+        else:
+            outcome = f"resulting Dice={rec.dice_after:.4f} ({rec.dice_after - rec.dice_before:+.4f})"
+        lines.append(f"- Round {rec.round}: applied to a skill scoring Dice={before} -> {outcome}\n  {rec.velocity}")
+    return "\n".join(lines)
+
+
 def velocity_update(
     llm: BaseChatModel,
     prev_velocity: str,
@@ -198,10 +228,17 @@ def velocity_update(
     skill_md: str,
     p_best_skill: str,
     g_best_skill: str | None,
+    history: list[VelocityRecord] | None = None,
+    current_dice: float | None = None,
 ) -> str:
     prompt = f"""\
 Previous velocity (revision directives from last round):
 {prev_velocity or "(none yet -- this is the first update)"}
+
+Recent trajectory (oldest first) -- what earlier velocities did to the score:
+{_format_trajectory(history or [])}
+
+Your current skill.md scores Dice={_format_score(current_dice)}.
 
 Fresh self-reflective direction from this round:
 {reflection}
@@ -222,6 +259,8 @@ Swarm global-best skill.md so far:
 
 def skill_update(llm: BaseChatModel, skill_md: str, velocity: str) -> str:
     prompt = f"""\
+{DATASET_DESCRIPTION}
+
 Your current skill.md:
 {skill_md}
 
@@ -240,12 +279,21 @@ def reflect_and_update(
     g_best_skill: str | None,
     settings: Settings,
     enriched_reflection: bool = False,
-) -> tuple[str, str, bool, list[str]]:
+) -> tuple[str, str, bool, list[str], list[VelocityRecord]]:
     """Run Reflect -> GroundReflection -> VelocityUpdate -> SkillUpdate. Returns
-    (new_skill_md, new_velocity, changed, retrieved_paper_ids). changed=False (and
-    retrieved_paper_ids=[]) only when there are no peers to reflect against."""
+    (new_skill_md, new_velocity, changed, retrieved_paper_ids, new_velocity_history).
+    changed=False (and retrieved_paper_ids=[]) only when there are no peers to reflect
+    against."""
     if not neighbourhood:
-        return agent.skill_md, agent.velocity, False, []
+        return agent.skill_md, agent.velocity, False, [], agent.velocity_history
+
+    # The previous velocity's outcome is this round's score (agent.last_dice, the skill
+    # that velocity produced). Filled in here from real scores, never by the LLM.
+    history = list(agent.velocity_history)
+    if history and not history[-1].outcome_recorded:
+        history[-1] = history[-1].model_copy(
+            update={"dice_after": agent.last_dice, "outcome_recorded": True}
+        )
 
     reflection = reflect(llm, agent.skill_md, agent.last_code, agent.last_dice, agent.last_iou, neighbourhood, enriched_reflection)
     docs = []
@@ -254,8 +302,20 @@ def reflect_and_update(
         docs = retrieve(query, settings)
         grounding = format_for_prompt(docs, settings)
         reflection = enrich_reflection(llm, draft, grounding)
-
     retrieved_paper_ids = [d.metadata.get("paper_id", "unknown") for d in docs]
-    v = velocity_update(llm, agent.velocity, reflection, agent.skill_md, agent.p_best_skill, g_best_skill)
+
+    # Velocity update
+    window = settings.velocity_history_len
+    shown = history[-window:] if window > 0 else []
+    v = velocity_update(
+        llm, agent.velocity, reflection, agent.skill_md, agent.p_best_skill, g_best_skill,
+        shown, agent.last_dice,
+    )
+
+    # Skill update
     s = skill_update(llm, agent.skill_md, v)
-    return s, v, True, retrieved_paper_ids
+    if window > 0:
+        next_round = history[-1].round + 1 if history else 1
+        history.append(VelocityRecord(round=next_round, velocity=v, dice_before=agent.last_dice))
+        history = history[-window:]
+    return s, v, True, retrieved_paper_ids, history

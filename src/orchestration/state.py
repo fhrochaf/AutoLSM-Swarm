@@ -13,12 +13,27 @@ from pydantic import BaseModel, ConfigDict
 _INF_SAFE = ConfigDict(ser_json_inf_nan="constants")
 
 
+class VelocityRecord(BaseModel):
+    """One past velocity and what it did: the skill it was applied to scored
+    dice_before; once the resulting skill has run, dice_after holds that score (None
+    with outcome_recorded=True means that run failed)."""
+
+    model_config = _INF_SAFE
+
+    round: int
+    velocity: str
+    dice_before: float | None = None
+    dice_after: float | None = None
+    outcome_recorded: bool = False
+
+
 class AgentState(BaseModel):
     model_config = _INF_SAFE
 
     agent_idx: int
     skill_md: str = ""
     velocity: str = ""  # semantic velocity direction; "" until the first peer-review update
+    velocity_history: list[VelocityRecord] = []  # most recent last, capped by settings.velocity_history_len
     p_best_skill: str = ""
     p_best_score: float = float("-inf")
     last_dice: float | None = None

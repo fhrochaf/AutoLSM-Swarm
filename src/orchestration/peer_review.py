@@ -277,26 +277,42 @@ def velocity_update(
     best_this_round: float | None = None,
 ) -> str:
     prompt = f"""\
+[
 Previous velocity (revision directives from last round):
 {prev_velocity or "(none yet -- this is the first update)"}
+]
 
+[
 Recent trajectory (oldest first) -- what earlier velocities did to the score:
 {_format_trajectory(history or [])}
+]
 
+[
 Your current skill.md scores Dice={_format_score(current_dice)}.
 Best score this round, across yourself and every peer: Dice={_format_score(best_this_round)}.
+]
 
+[
 Fresh self-reflective direction from this round:
 {reflection}
+]
 
+[
 Your current skill.md:
 {skill_md}
+]
 
+[
 Your personal-best skill.md so far (Dice={_format_score(p_best_score)}):
 {p_best_skill or "(same as current -- no better round yet)"}
+]
 
+[
 Swarm global-best skill.md so far (Dice={_format_score(g_best_score)}):
-{g_best_skill or "(no global-best recorded yet)"}"""
+{g_best_skill or "(no global-best recorded yet)"}
+]"""
+
+
     response = llm.with_retry(stop_after_attempt=settings.llm_retry_attempts).invoke(
         [("system", VELOCITY_SYSTEM_PROMPT), ("human", prompt)]
     )

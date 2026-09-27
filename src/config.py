@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     seed: int = 42
     
     max_train_tiles: int = 100
-    max_val_tiles: int = 50
+    max_val_tiles: int = 10
     max_debug_iters: int = 5
 
     # Budget for one driver.py subprocess call: package auto-install (agents can now

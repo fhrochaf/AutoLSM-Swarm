@@ -70,10 +70,13 @@ then each peer's pipeline.py + score.
 
 Instruction:
 - Compare your code to each peer's, mechanism by mechanism -- not "peer X scored higher, \
-adopt peer X", but WHY a specific technique likely helped or hurt, so the lesson generalizes.
+adopt peer X", but WHY a specific technique likely helped or hurt, so the lesson generalizes. \
+A mechanism can be architectural (a technique, layer, or preprocessing step) or a specific \
+declared hyperparameter/threshold value (e.g. "my dropout=0.5 vs. peer's 0.2") -- compare both.
 - If your code already does something better than every peer's, say so.
-- Return only a few bullet points describing to which direction your skill.md should be updated
-to achieve a better score."""
+- Return only a few bullet points describing candidate directions your skill.md could be \
+updated in to achieve a better score. This is diagnosis, not the decision -- the velocity \
+update step chooses which single one to actually act on."""
 
 REFLECT_SYSTEM_PROMPT_2 = """\
 Then end with exactly one line:
@@ -108,26 +111,65 @@ Instruction:
 and back off or change course where it lowered it or the run failed. Small score changes \
 (under ~0.01 Dice) may be noise, not evidence -- do not over-credit or over-blame a \
 directive for them.
+- Choose EXACTLY ONE change to make this round -- either ONE structural mechanism (one \
+architecture/preprocessing/loss-family/post-processing technique to add, replace, or \
+remove) OR ONE parametric change (one declared hyperparameter moved to a new value). \
+Never both, never several of either: a velocity that bundles multiple simultaneous \
+changes makes it impossible to tell which one actually caused next round's score to move, \
+which breaks the momentum rule above.
+- If the chosen change is parametric: name the exact parameter as it is declared in the \
+current skill.md's `## Hyperparameters` section, and state it as exactly \
+`CHANGE <param_name>: <current value> -> <new value>` on its own line, using the value \
+actually shown in skill.md as <current value> -- never a guessed or rounded one.
+- If the reflection, trajectory, personal-best, or global-best skill suggest more than \
+one promising direction, name the others briefly as deferred candidates for a future \
+round, clearly separated from the one directive being acted on now.
 - Begin the velocity with one line "FROM: <style of the current skill> -> TO: <where the \
-skill is being pushed>", then the directives.
+skill is being pushed>", then the one chosen directive, then any deferred candidates.
 - Combine the previous velocity, the fresh direction, and lessons from the personal-best \
-and global-best skills.
+and global-best skills when choosing which single change to make.
 - Focus on generalizable improvements, not one-off fixes.
 - Do not copy the personal-best or global-best skill directly.
 - Do not just converge it into a copy of another agent."""
 
 SKILL_UPDATE_SYSTEM_PROMPT = """\
 You rewrite a research agent's skill.md -- its durable, accumulated strategy for a \
-landslide-mapping pipeline -- by applying a given set of revision directives (a semantic \
-velocity). Build on the current skill.md rather than starting from scratch: keep what \
-the directives don't ask you to change, including existing literature citations, and \
-apply the directives concretely (state the specific new preprocessing/feature/model/ \
-post-processing choices, and why). Output the full revised skill.md, in the same style \
-as the input (concrete and actionable, citing paper ids where relevant)."""
+landslide-mapping pipeline -- by applying a given revision directive (a semantic \
+velocity). The velocity names EXACTLY ONE change to make this round -- either a \
+structural mechanism, or a parametric change in the form \
+`CHANGE <param_name>: <old> -> <new>` -- and may also name other candidate directions it \
+explicitly deferred to a future round. Apply only the one change being acted on now; \
+ignore the deferred candidates entirely, they are not part of this update.
+
+Build on the current skill.md rather than starting from scratch: keep everything the \
+directive doesn't ask you to change, including existing literature citations and every \
+other declared value in the `## Hyperparameters` section. Apply the one directive \
+concretely:
+- Structural change: state the specific new preprocessing/feature/model/post-processing \
+choice, and why.
+- Parametric change: update ONLY that parameter's line in `## Hyperparameters` to the new \
+value the directive gives (never a different number), and adjust any prose elsewhere \
+that names the old value so the document stays internally consistent.
+
+Every skill.md you output MUST still end with a `## Hyperparameters` section listing \
+every tunable numeric/categorical parameter the pipeline uses, one per line as \
+`- <param_name> = value  # short reason` -- carry this section forward, adding an \
+entry if the current skill.md doesn't yet declare a parameter the pipeline already \
+depends on. Output the full revised skill.md, in the same style as the input (concrete \
+and actionable, citing paper ids where relevant)."""
 
 
 def _format_score(value: float | None) -> str:
-    return "N/A (run failed)" if value is None else f"{value:.4f}"
+    if value is None:
+        return "N/A (run failed)"
+    if value in (float("inf"), float("-inf")):
+        return "N/A (no best yet)"
+    return f"{value:.4f}"
+
+
+def _best_score(dices: list[float | None]) -> float | None:
+    known = [d for d in dices if d is not None]
+    return max(known) if known else None
 
 
 def _format_observations(
@@ -230,6 +272,9 @@ def velocity_update(
     g_best_skill: str | None,
     history: list[VelocityRecord] | None = None,
     current_dice: float | None = None,
+    p_best_score: float | None = None,
+    g_best_score: float | None = None,
+    best_this_round: float | None = None,
 ) -> str:
     prompt = f"""\
 Previous velocity (revision directives from last round):
@@ -239,6 +284,7 @@ Recent trajectory (oldest first) -- what earlier velocities did to the score:
 {_format_trajectory(history or [])}
 
 Your current skill.md scores Dice={_format_score(current_dice)}.
+Best score this round, across yourself and every peer: Dice={_format_score(best_this_round)}.
 
 Fresh self-reflective direction from this round:
 {reflection}
@@ -246,10 +292,10 @@ Fresh self-reflective direction from this round:
 Your current skill.md:
 {skill_md}
 
-Your personal-best skill.md so far:
+Your personal-best skill.md so far (Dice={_format_score(p_best_score)}):
 {p_best_skill or "(same as current -- no better round yet)"}
 
-Swarm global-best skill.md so far:
+Swarm global-best skill.md so far (Dice={_format_score(g_best_score)}):
 {g_best_skill or "(no global-best recorded yet)"}"""
     response = llm.with_retry(stop_after_attempt=settings.llm_retry_attempts).invoke(
         [("system", VELOCITY_SYSTEM_PROMPT), ("human", prompt)]
@@ -277,6 +323,7 @@ def reflect_and_update(
     agent: AgentState,
     neighbourhood: list[AgentState],
     g_best_skill: str | None,
+    g_best_score: float,
     settings: Settings,
     enriched_reflection: bool = False,
 ) -> tuple[str, str, bool, list[str], list[VelocityRecord]]:
@@ -307,9 +354,10 @@ def reflect_and_update(
     # Velocity update
     window = settings.velocity_history_len
     shown = history[-window:] if window > 0 else []
+    best_this_round = _best_score([agent.last_dice] + [p.last_dice for p in neighbourhood])
     v = velocity_update(
         llm, agent.velocity, reflection, agent.skill_md, agent.p_best_skill, g_best_skill,
-        shown, agent.last_dice,
+        shown, agent.last_dice, agent.p_best_score, g_best_score, best_this_round,
     )
 
     # Skill update

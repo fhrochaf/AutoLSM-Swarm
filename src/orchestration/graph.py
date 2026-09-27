@@ -206,7 +206,7 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
             neighbourhood = [a for a in state.agents if a.agent_idx != agent.agent_idx]
             tqdm.write(f"{tag} peer review: reflecting against {len(neighbourhood)} peer(s)...")
             skill_md, velocity, skill_changed, retrieved_papers, velocity_history = peer_review.reflect_and_update(
-                llm, agent, neighbourhood, state.g_best_skill, settings, enriched_reflection
+                llm, agent, neighbourhood, state.g_best_skill, state.g_best_score, settings, enriched_reflection
             )
 
         cited_papers = peer_review.extract_cited_papers(skill_md)

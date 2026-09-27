@@ -27,7 +27,15 @@ a `skill.md` describing YOUR strategy: which data sources/channels you will use,
 what preprocessing/feature engineering you will apply, what model family you will \
 use, and why -- citing the specific retrieved papers that motivate each choice. \
 This skill.md is your own accumulated strategy; you will revise it in later rounds, \
-so write it as durable guidance to your future self, not as a one-off report."""
+so write it as durable guidance to your future self, not as a one-off report.
+
+Your skill.md MUST end with a `## Hyperparameters` section listing every tunable \
+numeric/categorical parameter your pipeline.py will use, one per line as \
+`- <param_name> = value  # short reason` (e.g. learning rate, loss weights, \
+probability threshold, dropout, epoch count, batch size, any threshold/percentile you \
+mention in prose elsewhere). This is the one place later rounds point to when tuning a \
+parameter -- every value your pipeline.py actually depends on must be declared here, not \
+only described in prose."""
 
 PIPELINE_SYSTEM_PROMPT = f"""\
 You write a single Python module, pipeline.py, implementing a fixed contract so it can \

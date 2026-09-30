@@ -1,6 +1,6 @@
-"""LangGraph state for the round loop. Each agent carries a skill (position),
-a velocity (semantic update direction), and
-its personal-best; the swarm carries a global-best."""
+"""LangGraph state for the round loop. Each agent carries a pipeline.py (position), a
+velocity (semantic update direction), and its personal-best pipeline; the swarm carries
+a global-best pipeline."""
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
@@ -14,8 +14,8 @@ _INF_SAFE = ConfigDict(ser_json_inf_nan="constants")
 
 
 class VelocityRecord(BaseModel):
-    """One past velocity and what it did: the skill it was applied to scored
-    dice_before; once the resulting skill has run, dice_after holds that score (None
+    """One past velocity and what it did: the pipeline it was applied to scored
+    dice_before; once the resulting pipeline has run, dice_after holds that score (None
     with outcome_recorded=True means that run failed)."""
 
     model_config = _INF_SAFE
@@ -31,15 +31,19 @@ class AgentState(BaseModel):
     model_config = _INF_SAFE
 
     agent_idx: int
-    skill_md: str = ""
+    # The agent's position: its last *working* pipeline.py (or, if it has never run
+    # successfully, the latest broken attempt -- the only thing to revise).
+    pipeline_code: str = ""
     velocity: str = ""  # semantic velocity direction; "" until the first peer-review update
     velocity_history: list[VelocityRecord] = []  # most recent last, capped by settings.velocity_history_len
-    p_best_skill: str = ""
+    p_best_code: str = ""
     p_best_score: float = float("-inf")
-    last_dice: float | None = None
+    last_dice: float | None = None  # mean Dice over the evaluation seeds -- the score selection uses
+    last_dice_per_seed: dict[int, float] = {}
+    last_dice_std: float | None = None
     last_iou: float | None = None
-    last_code: str = ""  # pipeline.py that produced last_dice/last_iou; "" if it failed
-    last_skill_changed: bool = True
+    last_hparams: dict = {}  # HPARAMS of the latest successful run
+    last_error: str | None = None  # why the latest run failed; None if it succeeded
 
 
 class SwarmState(BaseModel):
@@ -50,7 +54,7 @@ class SwarmState(BaseModel):
     n_rounds: int
     data_npz_path: str
     agents: list[AgentState]
-    g_best_skill: str | None = None
+    g_best_code: str | None = None
     g_best_score: float = float("-inf")
     rounds_without_improvement: int = 0  # consecutive rounds g_best_score hasn't improved
     in_progress_agents: dict[int, AgentState] = {}

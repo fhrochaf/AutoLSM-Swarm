@@ -1,13 +1,69 @@
-"""Prompt template strings for skill authoring and pipeline-script (re)generation."""
+"""Loader for src/prompts.yaml, the single home of every LLM prompt in the project.
+
+`render("velocity.system")` / `render("reflect.user", agent_idx=3, ...)` return the prompt
+text with its <<placeholders>> filled in. The module also computes the few dataset-derived
+strings the prompts embed, so switching `settings.dataset_name` re-points every prompt.
+"""
 from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import yaml
 
 from agents.pipeline_contract import build_required_funcs_doc
 from config import settings
 from data.registry import get_dataset_spec
 
+PROMPTS_PATH = Path(__file__).resolve().parent.parent / "prompts.yaml"
+_PLACEHOLDER = re.compile(r"<<(\w+)>>")
+_PROMPTS: dict = yaml.safe_load(PROMPTS_PATH.read_text(encoding="utf-8"))
+
+
+def _lookup(key: str) -> str:
+    node = _PROMPTS
+    for part in key.split("."):
+        node = node[part]
+    if not isinstance(node, str):
+        raise KeyError(f"prompt key {key!r} is a group, not a prompt")
+    return node
+
+
+def prompt_keys() -> list[str]:
+    """Every renderable prompt key (dotted), e.g. for tests."""
+    keys: list[str] = []
+
+    def walk(node: dict, prefix: str) -> None:
+        for name, value in node.items():
+            path = f"{prefix}{name}"
+            if isinstance(value, dict):
+                walk(value, f"{path}.")
+            else:
+                keys.append(path)
+
+    walk(_PROMPTS, "")
+    return keys
+
+
+def placeholders(key: str) -> set[str]:
+    return set(_PLACEHOLDER.findall(_lookup(key)))
+
+
+def render(key: str, **variables: object) -> str:
+    """Fill <<name>> placeholders. A placeholder without a value, or a value the prompt
+    never uses, is an error -- a typo in either place would otherwise silently ship a
+    broken prompt."""
+    text = _lookup(key)
+    wanted = set(_PLACEHOLDER.findall(text))
+    missing, unused = wanted - variables.keys(), variables.keys() - wanted
+    if missing or unused:
+        raise KeyError(f"prompt {key!r}: missing variables {sorted(missing)}, unused variables {sorted(unused)}")
+    return _PLACEHOLDER.sub(lambda m: str(variables[m.group(1)]), text).strip()
+
+
 # The single source of truth for "what dataset is this run about" -- swap
-# settings.dataset_name to point every prompt/doc-string below at a different
-# DatasetSpec (data/registry.py) without touching this file.
+# settings.dataset_name to point every prompt below at a different DatasetSpec
+# (data/registry.py) without touching the YAML.
 _DATASET_SPEC = get_dataset_spec(settings.dataset_name)
 
 DATASET_DESCRIPTION = _DATASET_SPEC.description
@@ -16,51 +72,8 @@ REQUIRED_FUNCS_DOC = build_required_funcs_doc(_DATASET_SPEC)
 # The corpus-retrieval query for round 0: derived from the dataset itself rather than an
 # assigned niche, so every agent's search is grounded in "how do I map this kind of
 # target given this kind of dataset" rather than a predetermined method family.
-RETRIEVAL_QUERY = f"""\
-Methods for landslide mapping/detection in this kind of dataset:
-{DATASET_DESCRIPTION}"""
+RETRIEVAL_QUERY = render("retrieval_query", dataset_description=DATASET_DESCRIPTION)
 
-SKILL_SYSTEM_PROMPT = """\
-You are a research agent whose job is to develop a landslide detection/mapping \
-pipeline for satellite imagery, grounded in published methodology. You will write \
-a `skill.md` describing YOUR strategy: which data sources/channels you will use, \
-what preprocessing/feature engineering you will apply, what model family you will \
-use, and why -- citing the specific retrieved papers that motivate each choice. \
-This skill.md is your own accumulated strategy; you will revise it in later rounds, \
-so write it as durable guidance to your future self, not as a one-off report.
-
-Your skill.md MUST end with a `## Hyperparameters` section listing every tunable \
-numeric/categorical parameter your pipeline.py will use, one per line as \
-`- <param_name> = value  # short reason` (e.g. learning rate, loss weights, \
-probability threshold, dropout, epoch count, batch size, any threshold/percentile you \
-mention in prose elsewhere). This is the one place later rounds point to when tuning a \
-parameter -- every value your pipeline.py actually depends on must be declared here, not \
-only described in prose."""
-
-PIPELINE_SYSTEM_PROMPT = f"""\
-You write a single Python module, pipeline.py, implementing a fixed contract so it can \
-be executed and evaluated by code you do not control. You MUST implement exactly these \
-functions:
-
-{REQUIRED_FUNCS_DOC}
-
-Rules:
-- You may import any published, pip-installable library that fits your strategy --
-including deep learning frameworks (PyTorch, TensorFlow/Keras, etc.), geospatial \
-libraries (rasterio, GDAL, geopandas, ...), or anything else. Only real, \
-correctly-named PyPI packages install successfully, so double-check the import name \
-matches the actual package (e.g. `import cv2` needs the PyPI package `opencv-python`, \
-not `cv2`; when they differ, prefer a library whose import name matches its package \
-name, or you'll fail on a bad install rather than a bad model).
-- `predict` must return binary {{0,1}} masks -- threshold internally if your model \
-produces probabilities.
-- Reproducibility is mandatory: at the very top of the module, before any other code, \
-deterministically seed every source of randomness any of your imports could draw from \
--- Python's `random`, `numpy`, and the equivalent seeding call or constructor argument \
-for every other library you import that exposes one (deep learning frameworks, \
-gradient-boosting/classical-ML libraries, etc.). Use the fixed seed {settings.seed} \
-everywhere you seed something. A Dice change between rounds must come from your \
-strategy, not from unseeded weight init, shuffling, or bootstrapping -- never rely on a \
-library's default RNG behavior.
-- Output ONLY the Python code for pipeline.py, in a single ```python code block. No \
-prose before or after."""
+PIPELINE_SYSTEM_PROMPT = render(
+    "pipeline.system", required_funcs_doc=REQUIRED_FUNCS_DOC, default_seed=settings.seed
+)

@@ -1,5 +1,6 @@
 """Landslide4Sense: fixed train/val/test split + loading for the labeled tiles.
-We carve our own train/val/test split out of the labeled tiles, once, with a fixed seed.
+Expects <dataset_dir>/img/image_N.h5 and <dataset_dir>/mask/mask_N.h5. The train/val/test
+split is carved out of these tiles with settings.split_ratios and settings.seed.
 """
 from __future__ import annotations
 
@@ -25,8 +26,8 @@ X arrays are shaped (N,128,128,14) float32; y arrays are shaped (N,128,128) uint
 
 
 def _labeled_ids(dataset_dir: Path) -> list[int]:
-    img_dir = dataset_dir / "TrainData" / "img"
-    mask_dir = dataset_dir / "TrainData" / "mask"
+    img_dir = dataset_dir / "img"
+    mask_dir = dataset_dir / "mask"
     ids = []
     for p in img_dir.glob("image_*.h5"):
         tile_id = int(p.stem.split("_")[1])
@@ -41,8 +42,8 @@ def _split_ids(dataset_dir: Path) -> dict[Split, list[int]]:
 
 
 def _load_tile(dataset_dir: Path, tile_id: int) -> tuple[np.ndarray, np.ndarray]:
-    img_path = dataset_dir / "TrainData" / "img" / f"image_{tile_id}.h5"
-    mask_path = dataset_dir / "TrainData" / "mask" / f"mask_{tile_id}.h5"
+    img_path = dataset_dir / "img" / f"image_{tile_id}.h5"
+    mask_path = dataset_dir / "mask" / f"mask_{tile_id}.h5"
     with h5py.File(img_path, "r") as f:
         img = f["img"][...].astype(np.float32)
     with h5py.File(mask_path, "r") as f:

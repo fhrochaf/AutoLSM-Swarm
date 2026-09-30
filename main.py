@@ -26,7 +26,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--agents", type=int, default=None, help="number of agents (default from config; ignored with --resume)")
     parser.add_argument("--rounds", type=int, default=None, help="number of rounds (default from config; required with --resume -- the target round to train up to)")
     parser.add_argument("--max-train-tiles", type=int, default=None, help="ignored with --resume -- data is reused from the original run")
-    parser.add_argument("--max-val-tiles", type=int, default=None, help="ignored with --resume -- data is reused from the original run")
+    parser.add_argument("--n-seeds", type=int, default=None, help="evaluate each pipeline under up to N of the seeds registered in config.eval_seeds (default: all of them)")
     parser.add_argument(
         "--plateau-patience",
         type=int,
@@ -48,8 +48,6 @@ def main(argv: list[str] | None = None) -> None:
             print(f"--agents {args.agents} ignored: agent count comes from the resumed run.")
         if args.max_train_tiles is not None:
             print(f"--max-train-tiles {args.max_train_tiles} ignored: data is reused from the resumed run.")
-        if args.max_val_tiles is not None:
-            print(f"--max-val-tiles {args.max_val_tiles} ignored: data is reused from the resumed run.")
         if args.rounds is None:
             raise SystemExit(
                 "--rounds is required with --resume: the target round count to keep "
@@ -59,10 +57,12 @@ def main(argv: list[str] | None = None) -> None:
         settings.n_rounds = args.rounds
     if args.max_train_tiles is not None:
         settings.max_train_tiles = args.max_train_tiles
-    if args.max_val_tiles is not None:
-        settings.max_val_tiles = args.max_val_tiles
     if args.plateau_patience is not None:
         settings.plateau_patience = args.plateau_patience
+    if args.n_seeds is not None:
+        if not 1 <= args.n_seeds <= len(settings.eval_seeds):
+            raise SystemExit(f"--n-seeds must be between 1 and {len(settings.eval_seeds)} (the seeds registered in config.eval_seeds)")
+        settings.n_seeds = args.n_seeds
     if args.agents is not None and args.resume is None:
         settings.n_agents = args.agents
 
@@ -99,7 +99,6 @@ def main(argv: list[str] | None = None) -> None:
             settings.dataset_dir,
             data_npz_path,
             settings.max_train_tiles,
-            settings.max_val_tiles,
         )
 
         state = create_initial_state(settings, run_id, data_npz_path)

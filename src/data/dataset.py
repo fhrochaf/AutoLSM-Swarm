@@ -68,10 +68,9 @@ def build_data_cache(
     dataset_dir: Path,
     cache_path: Path,
     max_train_tiles: int,
-    max_val_tiles: int,
     smoke_tile_ids: list[int] | None = None,
 ) -> Path:
-    """Build the shared train/val (+fixed smoke sample) npz reused by every agent and
+    """Build the shared train/val (full val split, +fixed smoke sample) npz reused by every agent and
     round in a run, so the dataset is only ever loaded from disk once per run.
 
     smoke_tile_ids defaults to the dataset's own DatasetSpec.smoke_tile_ids; pass it
@@ -83,7 +82,7 @@ def build_data_cache(
     tile_ids = smoke_tile_ids if smoke_tile_ids is not None else spec.smoke_tile_ids
 
     X_train, y_train, _ = spec.load_split("train", dataset_dir, max_train_tiles)
-    X_val, y_val, _ = spec.load_split("val", dataset_dir, max_val_tiles)
+    X_val, y_val, _ = spec.load_split("val", dataset_dir)
     X_sample, y_sample = spec.load_smoke_sample(dataset_dir, tile_ids)
 
     cache_path.parent.mkdir(parents=True, exist_ok=True)

@@ -7,6 +7,7 @@ chain on a couple of tiles to catch runtime errors early and cheaply.
 """
 from __future__ import annotations
 
+import json
 from types import ModuleType
 from typing import Any
 
@@ -22,7 +23,8 @@ class ContractError(Exception):
 
 
 def validate_module(mod: ModuleType) -> None:
-    """Static checks: required functions exist, are callable, train() is documented."""
+    """Static checks: required functions exist, are callable, train() is documented, and
+    HPARAMS declares the tunables (the handle the velocity's parametric changes point at)."""
     errors = []
     for name in REQUIRED_FUNCS:
         func = getattr(mod, name, None)
@@ -30,6 +32,18 @@ def validate_module(mod: ModuleType) -> None:
             errors.append(f"missing required function `{name}(...)`")
         elif not callable(func):
             errors.append(f"`{name}` exists but is not callable")
+
+    hparams = getattr(mod, "HPARAMS", None)
+    if not isinstance(hparams, dict) or not hparams:
+        errors.append(
+            "missing module-level `HPARAMS` dict -- it must declare every tunable value "
+            "the pipeline depends on (learning rate, loss weights, threshold, epochs, ...)"
+        )
+    else:
+        try:
+            json.dumps(hparams)
+        except TypeError as exc:
+            errors.append(f"`HPARAMS` must be JSON-serializable (numbers/strings/bools/lists): {exc}")
 
     train = getattr(mod, "train", None)
     if callable(train) and not (train.__doc__ and train.__doc__.strip()):

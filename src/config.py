@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     llm_provider: str = "google_genai"
     model_name: str = "gemini-3.1-flash-lite"
     api_key: str = ""
-    max_tokens: int = 32000
+    max_tokens: int = 100000
 
     # llm_provider: str = "google_genai"
     # model_name: str = "gemini-3.1-flash-lite"
@@ -30,22 +30,23 @@ class Settings(BaseSettings):
     # model_name: str = "deepseek-v4-pro"
 
     ################################
-    # Used only for judgement between the declarations in the skill.md and the elaborated code in pipeline.py
+    # Used only for the peer review (orchestration/peer_review.py::run_peer_review): one call per round that
+    # turns the code-computed metric tables of all agents into the comparative report agents reflect on.
     # llm_provider_2: str = "ollama"
     # model_name_2: str = "qwen3"
 
     llm_provider_2: str = "google_genai"
     model_name_2: str = "gemini-3.1-flash-lite"
     api_key_2: str = ""
-    max_tokens_2: int = 2000
+    max_tokens_2: int = 100000
 
     ################################
-    # Used only for pipeline.py creation (agents/codegen.py's generate_pipeline,
-    # fix_pipeline, revise_pipeline_for_fidelity)
+    # Used only for pipeline.py creation (agents/codegen.py's generate_initial_pipeline,
+    # apply_velocity, fix_pipeline)
     llm_provider_3: str = "anthropic"
     model_name_3: str = "claude-sonnet-5"
     api_key_3: str = ""
-    max_tokens_3: int = 32000
+    max_tokens_3: int = 100000
 
     temperature: float = 0.0
 
@@ -94,9 +95,18 @@ class Settings(BaseSettings):
 
     split_ratios: dict[str, float] = {"train": 0.7, "val": 0.15, "test": 0.15}
     seed: int = 42
+
+    # Seeds every pipeline is evaluated under: each one is exported to the pipeline as AUTOLSM_SEED and
+    # the pipeline is trained + scored once per seed. The score behind personal-best / global-best /
+    # the plateau rule is the mean Dice over these. n_seeds caps how many of them are used ("up to N";
+    # --n-seeds on the CLI); None uses all. A single seed reproduces single-run scoring.
+    eval_seeds: list[int] = [42, 43, 44]
+    n_seeds: int | None = None
+
+    def active_seeds(self) -> list[int]:
+        return self.eval_seeds[: self.n_seeds] if self.n_seeds else list(self.eval_seeds)
     
-    max_train_tiles: int = 100
-    max_val_tiles: int = 10
+    max_train_tiles: int = 1500
     max_debug_iters: int = 5
 
     # Budget for one driver.py subprocess call: package auto-install (agents can now

@@ -1,6 +1,6 @@
 """Text-cleanup helpers shared by every LLM call that returns code or markdown
-(agents/codegen.py's skill/pipeline generation, orchestration/peer_review.py's
-skill-update rewrite)."""
+(agents/codegen.py's pipeline generation, orchestration/peer_review.py's
+reflection / velocity / peer-review reports)."""
 from __future__ import annotations
 
 import re

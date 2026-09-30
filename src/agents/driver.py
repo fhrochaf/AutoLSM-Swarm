@@ -13,8 +13,14 @@ number of distinct install attempts per run, so a genuinely bad/nonexistent pack
 name fails cleanly back into the LLM debug loop instead of looping forever.
 
 Invoked as: python driver.py <src_dir> <pipeline_path> <data_npz_path>
+The seed comes from the AUTOLSM_SEED environment variable (set per run by runner.py; the
+pipeline reads it too), so one pipeline.py is scored under several seeds. Besides scoring,
+the driver writes the pipeline's binary predictions on the validation tiles to
+`val_preds_seed<S>.npz` next to pipeline.py; orchestration/peer_review.py compares those
+across agents (eval/observe.py) to build each round's peer observation.
+
 Prints exactly one JSON line to stdout:
-  {"status": "ok", "dice": <float>, "iou": <float>}
+  {"status": "ok", "seed": <int>, "dice": <float>, "iou": <float>, "hparams": {...}}
   {"status": "error", "error": "<message>", "traceback": "<traceback or "">"}
 Progress/diagnostics (e.g. package installs) go to stderr, never stdout, so they never
 interfere with that single JSON line.
@@ -23,6 +29,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import traceback
@@ -58,7 +65,8 @@ def _run_pipeline_once(pipeline_path: str, data_npz_path: str) -> dict:
     import numpy as np
 
     from agents.pipeline_contract import smoke_test, validate_module
-    from eval.infer import evaluate
+    from eval.infer import infer
+    from eval.metrics import dice, iou
 
     spec = importlib.util.spec_from_file_location("pipeline", pipeline_path)
     mod = importlib.util.module_from_spec(spec)
@@ -73,7 +81,18 @@ def _run_pipeline_once(pipeline_path: str, data_npz_path: str) -> dict:
     model = mod.build_model(None)
     model = mod.train(model, X_processed, data["y_train"])
 
-    return evaluate(mod, model, data["X_val"], data["y_val"])
+    preds = infer(mod, model, data["X_val"])
+    seed = int(os.environ.get("AUTOLSM_SEED", "0"))
+    np.savez_compressed(
+        Path(pipeline_path).with_name(f"val_preds_seed{seed}.npz"), preds=preds.astype(bool)
+    )
+    y_val = data["y_val"]
+    return {
+        "seed": seed,
+        "dice": dice(preds, y_val),
+        "iou": iou(preds, y_val),
+        "hparams": json.loads(json.dumps(mod.HPARAMS, default=str)),
+    }
 
 
 def main() -> None:

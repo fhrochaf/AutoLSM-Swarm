@@ -13,6 +13,9 @@ Each round, from round 1 on (all prompts live in src/prompts.yaml):
                    (optionally) d_i^t = GroundReflection(d_i^t, retrieved_lit_i)
     C. velocity      v_i^t+1 = VelocityUpdate(v_i^t, d_i^t, pipeline_i, p_best_i, g_best)
     D. position      pipeline_i^t+1 = ApplyVelocity(pipeline_i, v_i^t+1)  (agents/codegen.py)
+       (optional) fidelity gate: a judge checks pipeline_i^t+1 against v_i^t+1 and sends a
+                  NOT_FAITHFUL update back to the code LLM (agents/fidelity.py,
+                  config.fidelity_check)
 
 The peer observation O^t is behavioral and all text: the per-agent metric tables computed
 by eval/observe.py from every agent's validation predictions, plus the peer-review LLM's
@@ -33,6 +36,7 @@ from __future__ import annotations
 
 import difflib
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,7 +45,9 @@ from langchain_core.language_models import BaseChatModel
 
 from agents import artifacts
 from agents.codegen import apply_velocity
+from agents.fidelity import FidelityOutcome, enforce_fidelity
 from agents.prompts import DATASET_DESCRIPTION, render
+from agents.structured import VelocityAnswer, invoke_structured
 from config import Settings
 from corpus.retrieve import format_for_prompt, retrieve
 from eval import observe
@@ -58,6 +64,7 @@ _CITATION_RE = re.compile(r"2-s2\.0-\d+")
 
 # Matches the trailing "GROUNDING QUERY: ..." line Reflect is asked to emit.
 _GROUNDING_QUERY_RE = re.compile(r"(?im)^GROUNDING QUERY:\s*(.+?)\s*$")
+
 
 
 def extract_cited_papers(text: str) -> list[str]:
@@ -93,7 +100,8 @@ def _cap(code: str) -> str:
 
 def count_changed_lines(old: str, new: str) -> int:
     """Lines added plus removed between two versions of a pipeline.py -- how big the
-    move was, logged per round so a "single change" velocity can be audited."""
+    move was, logged per round so the size of each update (a one-line tweak, or a larger
+    multi-change one) can be audited."""
     diff = difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0)
     return sum(
         1 for line in diff if line[:1] in "+-" and not line.startswith(("+++", "---"))
@@ -269,7 +277,11 @@ def velocity_update(
     p_best_score: float | None = None,
     g_best_score: float | None = None,
     best_this_round: float | None = None,
-) -> str:
+) -> tuple[str, str]:
+    """Call C. Returns (velocity, reasoning). The answer is always requested as JSON with the
+    fields `reasoning` and `final_velocity` (agents/structured.py), whatever the prompt says, and
+    only `final_velocity` is used as the velocity: it is what the code LLM, the fidelity judge and
+    the trajectory see. If no JSON can be obtained at all, the raw reply is used as the velocity."""
     fence = "```"
     p_best_block = (
         f"{fence}python\n{_cap(p_best_code)}\n{fence}"
@@ -294,10 +306,11 @@ def velocity_update(
         g_best_score=_format_score(g_best_score),
         g_best_block=g_best_block,
     )
-    response = llm.with_retry(stop_after_attempt=settings.llm_retry_attempts).invoke(
-        [("system", render("velocity.system")), ("human", prompt)]
-    )
-    return response.text.strip()
+    parsed, raw = invoke_structured(llm, VelocityAnswer, [("system", render("velocity.system")), ("human", prompt)])
+    if parsed is not None and parsed.final_velocity.strip():
+        return parsed.final_velocity.strip(), parsed.reasoning.strip()
+    print("[velocity] no usable JSON answer from the LLM; using its raw reply as the velocity", file=sys.stderr)
+    return raw.strip(), ""
 
 
 # --------------------------------------------------------------------------------------
@@ -313,6 +326,8 @@ class PipelineUpdate:
     velocity_history: list[VelocityRecord]
     retrieved_papers: list[str]
     changed_lines: int
+    fidelity: FidelityOutcome | None = None  # None when the gate is off
+    velocity_reasoning: str = ""  # the `reasoning` field of the velocity answer ("" if the LLM gave none)
 
 
 def reflect_and_update(
@@ -325,9 +340,10 @@ def reflect_and_update(
     settings: Settings,
     round_idx: int,
     enriched_reflection: bool = False,
+    judge_llm: BaseChatModel | None = None,
 ) -> PipelineUpdate:
-    """Run Reflect (-> GroundReflection) -> VelocityUpdate -> ApplyVelocity for one
-    agent against this round's peer review."""
+    """Run Reflect (-> GroundReflection) -> VelocityUpdate -> ApplyVelocity (-> fidelity
+    gate, when settings.fidelity_check) for one agent against this round's peer review."""
     # The previous velocity's outcome is this round's score (agent.last_dice, the
     # pipeline that velocity produced). Filled in here from real scores, never by the LLM.
     history = list(agent.velocity_history)
@@ -346,17 +362,26 @@ def reflect_and_update(
 
     window = settings.velocity_history_len
     shown = history[-window:] if window > 0 else []
-    v = velocity_update(
+    v, velocity_reasoning = velocity_update(
         llm, agent.velocity, reflection, agent.pipeline_code, agent.p_best_code, g_best_code,
         shown, agent.last_dice, agent.p_best_score, g_best_score,
         _best_score(list(review.scores.values())),
     )
 
-    new_code = apply_velocity(code_llm, agent.pipeline_code, v)
+    new_code = apply_velocity(code_llm, agent.pipeline_code, v, velocity_reasoning)
+    fidelity = None
+    if settings.fidelity_check:
+        if judge_llm is None:
+            raise ValueError("settings.fidelity_check is on but no judge_llm was given to reflect_and_update")
+        fidelity = enforce_fidelity(
+            judge_llm, code_llm, v, agent.pipeline_code, new_code,
+            settings.max_fidelity_iters, settings.fidelity_web_search, velocity_reasoning,
+        )
+        new_code = fidelity.code
     if window > 0:
         history.append(VelocityRecord(round=round_idx, velocity=v, dice_before=agent.last_dice))
         history = history[-window:]
     return PipelineUpdate(
         new_code, v, reflection, history, retrieved_paper_ids,
-        count_changed_lines(agent.pipeline_code, new_code),
+        count_changed_lines(agent.pipeline_code, new_code), fidelity, velocity_reasoning,
     )

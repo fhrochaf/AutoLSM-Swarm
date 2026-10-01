@@ -28,6 +28,7 @@ from tqdm import tqdm
 
 from agents import artifacts
 from agents.codegen import generate_initial_pipeline
+from agents.prompts import PROMPTS_PATH
 from agents.prompts import RETRIEVAL_QUERY
 from agents.runner import run_agent_round
 from config import Settings
@@ -195,6 +196,7 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
             settings.runs_dir, state.run_id, round_idx, agent.agent_idx
         )
         changed_lines = None
+        fidelity = None
 
         if round_idx == 0:
             docs = agent_docs[agent.agent_idx]
@@ -206,23 +208,34 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
         else:
             enriched_reflection = (
                 settings.enriched_reflection_all
-                or agent.last_dice == state.g_best_score
+                or (agent.last_dice == state.g_best_score and settings.enriched_leader)
                 or agent.agent_idx in random_enriched_agents
             )
             # Later rounds: Reflect (-> GroundReflection) -> VelocityUpdate -> ApplyVelocity
             # against this round's peer review -- see peer_review.py.
             tqdm.write(
                 f"{tag} peer review: reflect -> velocity -> pipeline"
+                f"{' -> fidelity check' if settings.fidelity_check else ''}"
                 f"{' (enriched reflection)' if enriched_reflection else ''}..."
             )
             update = peer_review.reflect_and_update(
                 llm, code_llm, agent, review, state.g_best_code, state.g_best_score,
-                settings, round_idx, enriched_reflection,
+                settings, round_idx, enriched_reflection, judge_llm=peer_review_llm,
             )
             code, velocity, velocity_history = update.code, update.velocity, update.velocity_history
             retrieved_papers, changed_lines = update.retrieved_papers, update.changed_lines
+            fidelity = update.fidelity
             artifacts.write_text(agent_dir, "reflection.md", update.reflection)
             artifacts.write_text(agent_dir, "velocity.md", update.velocity)
+            if update.velocity_reasoning:
+                artifacts.write_text(agent_dir, "velocity_reasoning.md", update.velocity_reasoning)
+            if fidelity is not None:
+                artifacts.write_text(agent_dir, "fidelity.md", fidelity.report())
+                if fidelity.revisions or not fidelity.faithful:
+                    tqdm.write(
+                        f"{tag} fidelity: {fidelity.revisions} revision(s); "
+                        f"{'now FAITHFUL' if fidelity.faithful else 'still NOT_FAITHFUL -- running the latest attempt anyway'}"
+                    )
 
         cited_papers = peer_review.extract_cited_papers(code)
 
@@ -286,8 +299,11 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
                 "retrieved_papers": retrieved_papers,
                 "cited_papers": cited_papers,
                 "debug_iters": result.debug_iters,
-                # How big the move was, to audit that a velocity really was one change.
+                # How big the move was (lines added + removed), to audit what each velocity really did.
                 "changed_lines": changed_lines,
+                # Fidelity gate: None when it is off or in round 0 (no velocity to check).
+                "fidelity_faithful": fidelity.faithful if fidelity is not None else None,
+                "fidelity_revisions": fidelity.revisions if fidelity is not None else None,
                 "hparams": result.hparams,
                 "hparams_changed": (
                     peer_review.changed_hparams(agent.last_hparams, result.hparams)
@@ -363,6 +379,8 @@ def _finalize_node(state: SwarmState, settings: Settings) -> dict:
                     "success": e.get("success"),
                     "debug_iters": e.get("debug_iters", 0),
                     "changed_lines": e.get("changed_lines"),
+                    "fidelity_faithful": e.get("fidelity_faithful"),
+                    "fidelity_revisions": e.get("fidelity_revisions"),
                     "hparams_changed": e.get("hparams_changed", []),
                     "retrieved_papers": e.get("retrieved_papers", []),
                     "cited_papers": e.get("cited_papers", []),
@@ -387,6 +405,7 @@ def _finalize_node(state: SwarmState, settings: Settings) -> dict:
         },
         "stop_reason": stop_reason,
         "eval_seeds": settings.active_seeds(),
+        "prompts_file": PROMPTS_PATH.name,
         "rounds_run": state.round,
         "g_best_score": state.g_best_score,
         "best_agent": best_agent,

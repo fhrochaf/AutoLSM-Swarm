@@ -30,8 +30,10 @@ class Settings(BaseSettings):
     # model_name: str = "deepseek-v4-pro"
 
     ################################
-    # Used only for the peer review (orchestration/peer_review.py::run_peer_review): one call per round that
-    # turns the code-computed metric tables of all agents into the comparative report agents reflect on.
+    # Used for the peer review (orchestration/peer_review.py::run_peer_review): one call per round that
+    # turns the code-computed metric tables of all agents into the comparative report agents reflect on,
+    # and for the fidelity judge (agents/fidelity.py) when fidelity_check is on. Both are narrow
+    # read-and-summarize/judge tasks, so a cheap model is fine.
     # llm_provider_2: str = "ollama"
     # model_name_2: str = "qwen3"
 
@@ -42,7 +44,7 @@ class Settings(BaseSettings):
 
     ################################
     # Used only for pipeline.py creation (agents/codegen.py's generate_initial_pipeline,
-    # apply_velocity, fix_pipeline)
+    # apply_velocity, revise_pipeline_for_fidelity, fix_pipeline)
     llm_provider_3: str = "anthropic"
     model_name_3: str = "claude-sonnet-5"
     api_key_3: str = ""
@@ -76,6 +78,12 @@ class Settings(BaseSettings):
     dataset_name: str = "landslide4sense"
     dataset_dir: Path = REPO_ROOT / "archive"
     runs_dir: Path = REPO_ROOT / "runs_landslide4sense"
+
+    # The YAML holding every LLM prompt (see agents/prompts.py): a file name resolved under src/, or a path.
+    # Keep one file per prompt variant to compare; override per run without editing code with
+    # PROMPTS_FILE=prompts.yaml python main.py ...  (or in .env). A run stores a
+    # copy of the file it used as <run>/prompts_used.yaml.
+    prompts_file: str = "prompts_velocity_cot_multichanges.yaml"
 
     corpus_json_dir: Path =  Path(
         "/mnt/pool/landslide/AutoLSM-Swarm/AutoLSM-Swarm/output_fullPDF_with_guardrails_singlePDFread"
@@ -124,10 +132,23 @@ class Settings(BaseSettings):
     enriched_reflection_all: bool = False
     # If > 0.0, random enriched reflection will assign enriched reflections through CORPUS retrieval to a fraction of the agents
     random_enriched_reflection: float = 0.0
+    # If true, the agent with the best global score will have an enriched reflection in that round.
+    enriched_leader: bool = True
 
     # How many past velocities (with the Dice before/after applying each) the velocity
     # update sees as a "recent trajectory". 0 disables it.
     velocity_history_len: int = 2
+
+    # Fidelity gate after the velocity is applied (agents/fidelity.py): a judge LLM (role 2 above) checks that
+    # the updated pipeline.py implements exactly the one change the velocity chose and nothing else. If it
+    # answers NOT_FAITHFUL, the update goes back to the code LLM (role 3) to redo, up to max_fidelity_iters
+    # times; if it is still flagged after that, the latest attempt is run anyway and flagged in the ledger.
+    # Off: the updated pipeline is run as the code LLM returned it.
+    fidelity_check: bool = False
+    max_fidelity_iters: int = 4
+    # While redoing a flagged update the code LLM may look things up with Tavily web search (needs
+    # TAVILY_API_KEY in .env; without it the revision just runs without the tool).
+    fidelity_web_search: bool = False
 
 
 settings = Settings()

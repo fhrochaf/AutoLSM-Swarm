@@ -9,6 +9,9 @@ import argparse
 import json
 import sys
 
+import shutil
+
+from agents.prompts import PROMPTS_PATH, PROMPTS_SHA
 from config import Settings
 from corpus.ingest import build_index
 from data.dataset import build_data_cache
@@ -87,6 +90,12 @@ def main(argv: list[str] | None = None) -> None:
             f"round {state.round} -> {settings.n_rounds}{mid_round}"
         )
         recursion_limit = max(settings.n_rounds - state.round, 1) + 10
+        used = settings.runs_dir / run_id / "prompts_used.yaml"
+        if used.exists() and used.read_bytes() != PROMPTS_PATH.read_bytes():
+            print(
+                f"WARNING: prompts file {PROMPTS_PATH.name} differs from the {used.name} stored with run "
+                f"{run_id}; rounds from here on use the current text."
+            )
     else:
         run_id = new_run_id()
         print(f"Run {run_id}: {settings.n_agents} agent(s) x {settings.n_rounds} round(s)")
@@ -103,6 +112,8 @@ def main(argv: list[str] | None = None) -> None:
 
         state = create_initial_state(settings, run_id, data_npz_path)
         recursion_limit = settings.n_rounds + 10
+        shutil.copy2(PROMPTS_PATH, settings.runs_dir / run_id / "prompts_used.yaml")
+        print(f"Prompts: {PROMPTS_PATH.name} (sha {PROMPTS_SHA})")
 
     graph = build_graph(settings)
     final_state = graph.invoke(state, config={"recursion_limit": recursion_limit})

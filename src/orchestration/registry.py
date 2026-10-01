@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from agents.prompts import PROMPTS_PATH, PROMPTS_SHA
 from config import Settings
 from orchestration.state import SwarmState
 
@@ -49,6 +50,8 @@ def build_record(
         "registered_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "git": git,
         "dataset": settings.dataset_name,
+        "prompts_file": PROMPTS_PATH.name,
+        "prompts_sha": PROMPTS_SHA,  # which exact prompt text produced this result
         "llms": {
             "primary": f"{settings.llm_provider}/{settings.model_name}",
             "peer_review": f"{settings.llm_provider_2}/{settings.model_name_2}",
@@ -64,6 +67,12 @@ def build_record(
         "velocity_history_len": settings.velocity_history_len,
         "enriched_reflection_all": settings.enriched_reflection_all,
         "random_enriched_reflection": settings.random_enriched_reflection,
+        "fidelity_check": settings.fidelity_check,
+        "max_fidelity_iters": settings.max_fidelity_iters,
+        "fidelity_web_search": settings.fidelity_web_search,
+        # agent-rounds the judge flagged at least once / that stayed flagged after the last revision
+        "n_fidelity_flagged": sum(1 for e in ledger if (e.get("fidelity_revisions") or 0) > 0 or e.get("fidelity_faithful") is False),
+        "n_fidelity_unresolved": sum(1 for e in ledger if e.get("fidelity_faithful") is False),
         "max_train_tiles": settings.max_train_tiles,
         "g_best_score": state.g_best_score if state.g_best_score > float("-inf") else None,
         "g_best_dice_per_seed": best_row.get("dice_per_seed") if best_row else None,

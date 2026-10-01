@@ -1,3 +1,8 @@
+# VARIANT: chain-of-thought velocity update that may make SEVERAL changes per round (structural
+# and/or parametric, in any mix). It differs from prompts_velocity_update_cot.yaml in the velocity.system,
+# pipeline.apply_velocity_user and reflect.system prompts. The fidelity.* prompts are unchanged and still
+# describe the one-change rule: keep config.fidelity_check off with this file, or rewrite them first.
+#
 # Every LLM prompt used by the swarm, in one place. Loaded and rendered by
 # agents/prompts.py::render(key, **variables).
 #
@@ -61,8 +66,8 @@ pipeline:
     The reasoning that led to that directive (context, so you understand its intent; what you apply is the directive above):
     <<velocity_reasoning>>
 
-    Apply EXACTLY the one change the directive chose, and nothing else. Keep every other line, function, `HPARAMS` value, and the seeding block as they are -- do not refactor, rename, reformat, or "improve" anything the directive does not name.
-    If the change is `CHANGE <key>: <old> -> <new>`, edit only that `HPARAMS` entry (and only the code strictly needed to keep the pipeline consistent). Output the complete revised pipeline.py.
+    Apply EXACTLY the change(s) the directive lists -- every one of them -- and nothing else. Keep every other line, function, `HPARAMS` value, and the seeding block as they are -- do not refactor, rename, reformat, or "improve" anything the directive does not name.
+    For each change written as `CHANGE <key>: <old> -> <new>`, edit only that `HPARAMS` entry (and only the code strictly needed to keep the pipeline consistent). For each structural change, implement the described mechanism in the place the directive names. If the directive lists several changes, they all belong in this one revised pipeline.py. Output the complete revised pipeline.py.
 
   fix_user: |
     The following pipeline.py failed when executed:
@@ -113,7 +118,7 @@ reflect:
     - Diagnose from behavior. Explain WHY your pipeline behaves as the tables show, tying each symptom to a specific mechanism in your own code (an architecture choice, a loss term, preprocessing, a threshold, a post-processing step, or a value in its HPARAMS) -- e.g. "predicted-positive rate is 2x the true rate; my fixed threshold and unweighted loss favor over-segmentation".
     - Learn from peers' behavior, not from a score gap: if a peer is better at small landslides, or has far fewer false-alarm tiles, say what kind of mechanism would produce that behavior, without assuming you know its code.
     - If your pipeline already beats every peer on a behavior, say so.
-    - Return only a few bullet points of candidate directions for changing your pipeline.py. Each must be a testable hypothesis that names the metric(s) in the tables it should move. This is diagnosis, not the decision -- the velocity update step chooses which single one to act on.
+    - Return only a few bullet points of candidate directions for changing your pipeline.py. Each must be a testable hypothesis that names the metric(s) in the tables it should move. This is diagnosis, not the decision -- the velocity update step chooses which one or several to act on.
 
   grounding_suffix: |
     Then end with exactly one line:
@@ -156,16 +161,71 @@ velocity:
 
     Instruction:
     - Use the recent trajectory as momentum: keep pushing in a direction that raised the score, and back off or change course where it lowered it or the run failed. Small score changes (under ~0.01 Dice) may be noise, not evidence -- do not over-credit or over-blame a directive for them.
-    - Choose EXACTLY ONE change to make this round -- either ONE structural mechanism (one architecture/preprocessing/loss-family/post-processing technique to add, replace, or remove) OR ONE parametric change (one entry of the pipeline's `HPARAMS` dict moved to a new value). Never both, never several of either: a velocity that bundles multiple simultaneous changes makes it impossible to tell which one actually caused next round's score to move, which breaks the momentum rule above.
-    - If the chosen change is parametric: name the exact key as it appears in the current pipeline's `HPARAMS`, and state it as exactly `CHANGE <key>: <current value> -> <new value>` on its own line, using the value actually shown in the code as <current value>.
-    - If it is structural: say precisely what to add, replace, or remove and in which function of the current pipeline.
-    - Combine the previous velocity, the fresh direction, and lessons from the personal-best and global-best pipelines when choosing which single change to make.
+    - Choose the changes to make this round -- one or several. Each change is either a structural mechanism (an architecture/preprocessing/loss-family/post-processing technique to add, replace, or remove) or a parametric change (one entry of the pipeline's `HPARAMS` dict moved to a new value), and a velocity may mix both kinds. Make several changes together only when they serve the same diagnosed weakness or one needs the other (for example a loss weight and the threshold that has to move with it). Keep the set coherent and no larger than the evidence supports: unrelated changes bundled together make it hard to tell what moved the score next round.
+    - For every parametric change: name the exact key as it appears in the current pipeline's `HPARAMS`, and state it as exactly `CHANGE <key>: <current value> -> <new value>` on its own line (one line per parametric change), using the value actually shown in the code as <current value>.
+    - For every structural change: say precisely what to add, replace, or remove and in which function of the current pipeline.
+    - Combine the previous velocity, the fresh direction, and lessons from the personal-best and global-best pipelines when choosing which changes to make.
     - Focus on generalizable improvements, not one-off fixes.
     - Do not copy the personal-best or global-best pipeline directly; do not just converge into a copy of another agent.
 
-    Your answer is given in the structured format provided: a short `reasoning` (why you chose this change) and `final_velocity` (the directive and nothing else). Only `final_velocity` is passed on to the agent that edits pipeline.py, so it must be complete and self-contained.
-#    - Give the hypothesis behind the change and an EXPECTED SIGNATURE: which behavior metrics (precision, recall, false-alarm tiles, small-landslide recall, blob counts, ...) should move, and in which direction. Next round's tables will be checked against it.
-#    - Format: one line "FROM: <character of the current pipeline> -> TO: <where it is being pushed>", then the single directive (with its CHANGE line if parametric), then "EXPECTED SIGNATURE: ...", then any "DEFERRED: ..." candidates.
+    Think step by step BEFORE you decide. Your answer is given in the structured format provided, with two fields.
+
+    Field `reasoning` -- your complete reasoning, written out as these numbered steps:
+
+    1. Trajectory review: List each past velocity alongside the score delta it produced.
+      Identify the direction of momentum: is the score trending up, flat, or down?
+      Flag any run that failed outright (crash, NaN, timeout) — treat it as a hard veto,
+      not a small negative signal.
+
+    2. Noise filter: For each score delta under ~0.01 Dice, mark it as "ambiguous."
+      Do not credit or blame the directive that produced it. Only deltas ≥ 0.01
+      (positive or negative) count as actionable evidence for or against a direction.
+
+    3. Previous velocity assessment: State what the previous velocity instructed.
+      Given step 1–2, did it produce a meaningful positive result, a meaningful negative
+      result, or an ambiguous one? Decide: continue that direction, reverse it, or pivot.
+      If it bundled several changes, the score delta belongs to the set as a whole and cannot
+      be split between its parts: judge the set, and if it did badly, say which part you
+      suspect and consider keeping the rest.
+
+    4. Self-reflective direction integration: Read this round's self-reflective direction.
+      Note where it agrees with the trajectory evidence and where it conflicts.
+      Resolve any conflict explicitly — trajectory evidence outweighs intuition unless
+      the reflection identifies a structural reason the trajectory evidence is misleading.
+
+    5. Personal-best pipeline analysis: Compare the current pipeline to the personal-best.
+      Identify the mechanism(s) or hyperparameter(s) present in the personal-best but
+      absent (or set differently) in the current pipeline that could explain the score gap.
+      Note each one as a candidate change.
+
+    6. Global-best pipeline analysis: Do the same for the global-best pipeline.
+      Identify the candidate change(s) it suggests that the personal-best does not
+      already cover. Do not plan to copy either pipeline wholesale.
+
+    7. Candidate enumeration: List all candidate changes surfaced in steps 3–6.
+      For each, state whether it is structural or parametric, what score improvement
+      it might plausibly produce, and what risk it carries (instability, overfitting,
+      run failure, masking a prior improvement). Note which candidates need each other
+      and which conflict.
+
+    8. Selection: Choose the candidate(s) from step 7 to apply this round -- one or several,
+      structural and parametric in any mix. For each chosen candidate, justify in a sentence
+      why this change and why now. If you choose several, say how they relate (same diagnosed
+      weakness, complementary, or one enabling the other), why applying them together beats
+      applying them one at a time, and confirm that none of them conflicts with another.
+      Leave out any candidate that is unrelated to the others or whose evidence is weak.
+
+    9. Formulation check: For every chosen parametric change -- write the
+      `CHANGE <key>: <current> -> <new>` line and verify the current value matches the code exactly.
+      For every chosen structural change -- write the precise description (what, where in which
+      function, add/replace/remove). Confirm the list contains exactly the changes you chose,
+      with nothing extra bundled in.
+
+    Field `final_velocity` -- the directive and nothing else: the chosen change(s), written as the instructions above require, one item per change (a `CHANGE <key>: <current value> -> <new value>` line for each parametric change, a precise structural description for each structural change). Do not repeat the reasoning here.
+
+  # Only `final_velocity` is passed on. The agent that edits pipeline.py cannot see your `reasoning`, so the final velocity must be complete and self-contained.
+  #    - Give the hypothesis behind the change and an EXPECTED SIGNATURE: which behavior metrics (precision, recall, false-alarm tiles, small-landslide recall, blob counts, ...) should move, and in which direction. Next round's tables will be checked against it.
+  #    - Format: one line "FROM: <character of the current pipeline> -> TO: <where it is being pushed>", then the single directive (with its CHANGE line if parametric), then "EXPECTED SIGNATURE: ...", then any "DEFERRED: ..." candidates.
 
   user: |
     [
@@ -179,17 +239,12 @@ velocity:
     ]
 
     [
-    Your current pipeline.py scores Dice=<<current_dice>>.
-    Best score this round, across yourself and every peer: Dice=<<best_this_round>>.
-    ]
-
-    [
     Fresh self-reflective direction from this round:
     <<reflection>>
     ]
 
     [
-    Your current pipeline.py:
+    Your current pipeline.py (Dice=<<current_dice>>):
     ```python
     <<pipeline_code>>
     ```

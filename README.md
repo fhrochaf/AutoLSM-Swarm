@@ -51,12 +51,25 @@ in one file, [`src/prompts.yaml`](src/prompts.yaml):
 4. **Velocity update** (LLM call *C*, per agent). Merges the grounded reflection with the
    previous velocity, the recent trajectory (past velocities and the Dice each one
    produced), the agent's own personal-best pipeline and the swarm's global-best pipeline
-   into **one** directive: either a single `CHANGE <HPARAMS key>: old -> new` or one
-   structural mechanism, plus the metric movement it predicts. Then **call *D*** turns the
-   current `pipeline.py` and that velocity into the next `pipeline.py`, changing nothing
-   else. Every pipeline declares its tunables in a module-level `HPARAMS` dict, so a
+   into one directive: with the default prompts a single `CHANGE <HPARAMS key>: old -> new`
+   or one structural mechanism; with the multi-change prompts (see "Prompt variants") a
+   coherent set of them. How many changes a velocity may hold is decided by the prompts, not
+   the code. Then **call *D*** turns the current `pipeline.py` and that velocity into the next
+   `pipeline.py`, changing nothing the velocity does not name. Every pipeline declares its tunables in a module-level `HPARAMS` dict, so a
    parametric change is exact and the size of every move is measurable
    (`changed_lines`, `hparams_changed` in the ledger).
+   **Optional fidelity gate** (`fidelity_check` in `src/config.py`, on by default). Right
+   after call *D*, a judge LLM ([`src/agents/fidelity.py`](src/agents/fidelity.py)) reads the
+   velocity, the diff from the previous to the updated `pipeline.py`, and the updated code,
+   and decides whether the chosen change was applied correctly and nothing else changed (its
+   prompts describe the one-change rule, so leave the gate off with the multi-change prompts). A
+   `NOT_FAITHFUL` verdict sends the update back to the code LLM to redo, up to
+   `max_fidelity_iters` times; while redoing it, the code LLM may use Tavily web search
+   (`fidelity_web_search`, needs `TAVILY_API_KEY`) to look up the exact formula of a named
+   technique. If it is still flagged after the last revision, the latest attempt is run
+   anyway and marked `fidelity_faithful: false` in the ledger. The gate judges velocity
+   applications only (not round-0 pipelines or crash fixes), and each check is logged in
+   `fidelity.md` next to the pipeline.
 5. **Validation-based best tracking.** A new pipeline only replaces an agent's
    personal-best (or the swarm's global-best) if its mean Dice improves on the previous
    best by more than a margin `p_best_epsilon`, damping noisy fluctuations.
@@ -158,8 +171,12 @@ agent's prompt.
   retrieval settings.
 - **`src/agents/`** — everything about one agent's own write/run/debug cycle:
   - [`codegen.py`](src/agents/codegen.py) — LLM calls that write the round-0
-    `pipeline.py` from retrieved papers, apply one velocity to a pipeline (call *D*), or
-    fix a pipeline that crashed.
+    `pipeline.py` from retrieved papers, apply one velocity to a pipeline (call *D*), redo
+    an update the fidelity judge flagged (optionally with Tavily web search), or fix a
+    pipeline that crashed.
+  - [`fidelity.py`](src/agents/fidelity.py) — the optional gate after call *D*: a judge LLM
+    checks the updated `pipeline.py` against the velocity and sends `NOT_FAITHFUL` updates
+    back to the code LLM, up to `max_fidelity_iters` times.
   - [`driver.py`](src/agents/driver.py) — standalone subprocess entry point that
     actually executes one `pipeline.py` end-to-end (preprocess → train → evaluate) under
     one seed (`AUTOLSM_SEED`) in isolation from the orchestrator, saving its validation
@@ -170,8 +187,10 @@ agent's prompt.
   - [`pipeline_contract.py`](src/agents/pipeline_contract.py) — the fixed interface
     every generated pipeline must implement (including `HPARAMS`), plus the smoke test
     that checks it cheaply before a full run.
-  - [`prompts.py`](src/agents/prompts.py) — loads [`src/prompts.yaml`](src/prompts.yaml),
-    the one file holding every prompt in the project, and renders its `<<placeholders>>`.
+  - [`prompts.py`](src/agents/prompts.py) — loads the prompts YAML (default
+    [`src/prompts.yaml`](src/prompts.yaml)), the one file holding every prompt of a run, and
+    renders its `<<placeholders>>`. Which file is read is `prompts_file` in `src/config.py`
+    (see "Prompt variants" below); it is validated at start-up.
   - [`artifacts.py`](src/agents/artifacts.py) — per-run/round/agent file I/O
     (`<runs_dir>/<run_id>/round_<t>/agent_<i>/{pipeline.py,reflection.md,velocity.md,...}`).
   - [`text_utils.py`](src/agents/text_utils.py) — small helpers for cleaning LLM output
@@ -234,8 +253,8 @@ The swarm uses up to three independently-configured LLMs
 | Role | Settings | Used for |
 |---|---|---|
 | Primary | `llm_provider` / `model_name` | the per-agent reflection chain (`Reflect → GroundReflection → VelocityUpdate`) |
-| Peer review | `llm_provider_2` / `model_name_2` | the once-per-round peer-review report on the code-computed metric tables — deliberately cheap/small, since it only summarizes numbers it is given |
-| Code | `llm_provider_3` / `model_name_3` | writing the round-0 `pipeline.py`, applying velocities to it, and fixing crashes (`agents/codegen.py`) |
+| Peer review / judge | `llm_provider_2` / `model_name_2` | the once-per-round peer-review report on the code-computed metric tables, and the optional fidelity judge that checks each updated `pipeline.py` against its velocity — deliberately cheap/small, since both are narrow read-and-judge tasks |
+| Code | `llm_provider_3` / `model_name_3` | writing the round-0 `pipeline.py`, applying velocities to it, redoing updates the judge flagged, and fixing crashes (`agents/codegen.py`) |
 
 Add the required API key(s) to a `.env` file at the repo root — one per distinct
 provider used above (e.g. `ANTHROPIC_API_KEY`, `GOOGLE_GENAI_API_KEY`); if two roles
@@ -263,10 +282,59 @@ python main.py [--agents N] [--rounds T] [--max-train-tiles N] [--n-seeds N]
 Each run writes to `<runs_dir>/<run_id>/` (`runs_dir` in
 [`src/config.py`](src/config.py), default `runs_landslide4sense/`): per-round
 `peer_review.md` / `peer_review_tables.md`, per-round, per-agent
-`pipeline.py`/`reflection.md`/`velocity.md`/`driver_stdout.json` and per-seed validation
+`pipeline.py`/`reflection.md`/`velocity.md`/`velocity_reasoning.md`/`fidelity.md`/`driver_stdout.json` and per-seed validation
 predictions, an append-only `ledger.jsonl` of every round's scores (per seed, with the
-size of each change and the behavior metrics), a `state_snapshot.json` checkpoint (used
+size of each change, the fidelity verdict and the behavior metrics), a `state_snapshot.json` checkpoint (used
 by `--resume`), `g_best_pipeline.py`, and a final `summary.json`.
+
+### Prompt variants
+
+Every prompt lives in one YAML file, and `prompts_file` in [`src/config.py`](src/config.py)
+says which one a run reads: a name resolved under `src/` (default `prompts.yaml`), or a path.
+Keep one file per variant and select it per run without touching code:
+
+```bash
+PROMPTS_FILE=prompts_velocity_update_cot.yaml python main.py --agents 5 --rounds 10
+```
+
+(or set `PROMPTS_FILE` in `.env`). The file is checked when the program starts, before any LLM call
+or training is paid for. Only two things stop a run, each with the file name and the problem:
+a file that does not exist, and a prompt that an enabled feature needs but the file lacks
+(there is nothing to send). Placeholders never stop a run: a prompt may leave them out (e.g.
+drop the trajectory from the velocity prompt) and they are just not shown, while one the code
+does not supply (a typo, or one from another version of the prompts) gets a warning and is
+left as written in the text.
+The fidelity and enrichment prompts are only required when those features are switched on.
+Each run stores the file it used as `<run>/prompts_used.yaml`, and the registry records its
+name and a short hash (`prompts_file`, `prompts_sha`), so results can be traced to the exact
+prompt text; `--resume` warns if the file changed since the run started.
+
+**Structured answers, independent of the prompt.** Two calls produce an answer the code has to
+read one part of, so the code fixes their shape instead of relying on prompt wording
+([`src/agents/structured.py`](src/agents/structured.py)): the velocity update is always
+requested as JSON with the fields `reasoning` and `final_velocity`, and the fidelity judge
+with `violations` and `verdict` (`FAITHFUL` / `NOT_FAITHFUL`). `final_velocity` is the velocity: the
+directive the code LLM applies, the fidelity judge checks, and the trajectory records. The
+`reasoning` is saved in `velocity_reasoning.md` and given to the code LLM as context (in the
+update call and when it redoes a flagged one, via `<<velocity_reasoning>>` in those prompts), but
+it is deliberately hidden from the fidelity judge, which must judge the directive on its own. The schema is sent with the request through the provider's native
+structured output; if that is unavailable, the code asks for the same JSON in plain text, and
+as a last resort uses the raw reply as the velocity (and honors a trailing `VERDICT:` line from
+the judge). So any prompt file works, even one that says nothing about JSON; the prompts only
+have to explain what belongs in each field.
+
+[`src/prompts_velocity_cot_multichanges.yaml`](src/prompts_velocity_cot_multichanges.yaml) is the
+chain-of-thought variant below with the one-change limit taken out of the velocity, apply and
+reflect prompts: the velocity may list several changes (structural and parametric, in any mix) when
+they serve the same weakness or need each other, and the update applies all of them. Nothing in
+the code assumes a count: every change shows up in the ledger (`hparams_changed` lists every
+`HPARAMS` value that moved, `changed_lines` the size of the edit). Its judge prompts are unchanged
+and still describe one change, so run it with `fidelity_check = False`.
+
+[`src/prompts_velocity_update_cot.yaml`](src/prompts_velocity_update_cot.yaml) is the default
+prompts with a **chain-of-thought velocity update**: the model is told to put numbered reasoning
+(last move, diagnosis, 2–4 candidate changes, elimination, decision) in `reasoning` and only the
+chosen directive in `final_velocity`.
 
 Every finished run is also registered in `<runs_dir>/registry.jsonl` (and a flattened
 `registry.csv`): one row per run with its configuration (models, agents, rounds, seeds,

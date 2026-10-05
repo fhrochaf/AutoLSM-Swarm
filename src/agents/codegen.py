@@ -35,8 +35,13 @@ def _invoke_code(llm: BaseChatModel, prompt: str) -> str:
     return extract_code(response.text)
 
 
-def generate_initial_pipeline(llm: BaseChatModel, retrieved_papers: str) -> str:
-    """Round 0: a first pipeline.py chosen straight from the retrieved literature."""
+def generate_initial_pipeline(llm: BaseChatModel, retrieved_papers: str | None) -> str:
+    """Round 0: a first pipeline.py chosen straight from the retrieved literature, or, when
+    retrieved_papers is None (settings.use_rag off), from the dataset description alone."""
+    if retrieved_papers is None:
+        return _invoke_code(
+            llm, render("pipeline.initial_user_no_rag", dataset_description=DATASET_DESCRIPTION)
+        )
     return _invoke_code(
         llm,
         render(

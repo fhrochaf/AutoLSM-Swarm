@@ -65,6 +65,7 @@ def build_record(
         "p_best_epsilon": settings.p_best_epsilon,
         "plateau_patience": settings.plateau_patience,
         "velocity_history_len": settings.velocity_history_len,
+        "use_rag": settings.use_rag,
         "enriched_reflection_all": settings.enriched_reflection_all,
         "random_enriched_reflection": settings.random_enriched_reflection,
         "fidelity_check": settings.fidelity_check,

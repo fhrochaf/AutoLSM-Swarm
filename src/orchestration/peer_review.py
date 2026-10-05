@@ -352,6 +352,7 @@ def reflect_and_update(
             update={"dice_after": agent.last_dice, "outcome_recorded": True}
         )
 
+    enriched_reflection = enriched_reflection and settings.use_rag
     reflection = reflect(llm, agent, review, enriched_reflection)
     docs = []
     if enriched_reflection:

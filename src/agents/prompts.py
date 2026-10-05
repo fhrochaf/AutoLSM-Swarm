@@ -37,6 +37,7 @@ PROMPT_VARIABLES: dict[str, set[str]] = {
     "retrieval_query": {"dataset_description"},
     "pipeline.system": {"required_funcs_doc", "default_seed"},
     "pipeline.initial_user": {"dataset_description", "retrieved_papers"},
+    "pipeline.initial_user_no_rag": {"dataset_description"},
     "pipeline.apply_velocity_user": {"dataset_description", "current_code", "velocity", "velocity_reasoning"},
     "pipeline.fix_user": {"previous_code", "error_message"},
     "peer_review.system": set(),
@@ -60,6 +61,8 @@ PROMPT_VARIABLES: dict[str, set[str]] = {
 }
 _FIDELITY_KEYS = {k for k in PROMPT_VARIABLES if k.startswith("fidelity.")}
 _ENRICH_KEYS = {"reflect.grounding_suffix", "reflect.enrich_system", "reflect.enrich_user"}
+_RAG_KEYS = {"retrieval_query", "pipeline.initial_user"}
+_NO_RAG_KEYS = {"pipeline.initial_user_no_rag"}
 
 
 def resolve_prompts_path(name: str) -> Path:
@@ -113,10 +116,12 @@ def placeholders(key: str) -> set[str]:
 
 def required_keys() -> set[str]:
     """Prompts the current config can actually reach: optional features only when enabled."""
-    keys = set(PROMPT_VARIABLES) - _FIDELITY_KEYS - _ENRICH_KEYS
+    keys = set(PROMPT_VARIABLES) - _FIDELITY_KEYS - _ENRICH_KEYS - _NO_RAG_KEYS
     if settings.fidelity_check:
         keys |= _FIDELITY_KEYS
-    if settings.enriched_reflection_all or settings.random_enriched_reflection > 0 or settings.enriched_leader:
+    if not settings.use_rag:
+        keys = (keys - _RAG_KEYS) | _NO_RAG_KEYS
+    elif settings.enriched_reflection_all or settings.random_enriched_reflection > 0 or settings.enriched_leader:
         keys |= _ENRICH_KEYS
     return keys
 
@@ -184,7 +189,7 @@ REQUIRED_FUNCS_DOC = build_required_funcs_doc(_DATASET_SPEC)
 # The corpus-retrieval query for round 0: derived from the dataset itself rather than an
 # assigned niche, so every agent's search is grounded in "how do I map this kind of
 # target given this kind of dataset" rather than a predetermined method family.
-RETRIEVAL_QUERY = render("retrieval_query", dataset_description=DATASET_DESCRIPTION)
+RETRIEVAL_QUERY = render("retrieval_query", dataset_description=DATASET_DESCRIPTION) if settings.use_rag else ""
 
 PIPELINE_SYSTEM_PROMPT = render(
     "pipeline.system", required_funcs_doc=REQUIRED_FUNCS_DOC, default_seed=settings.seed

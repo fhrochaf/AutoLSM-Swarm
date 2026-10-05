@@ -165,7 +165,10 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
 
     agent_docs: list[list[Document]] = []
     review = None
-    if round_idx == 0 and remaining:
+    if round_idx == 0 and remaining and not settings.use_rag:
+        tqdm.write(f"round {round_idx}: use_rag is off -- no corpus retrieval")
+        agent_docs = [[] for _ in state.agents]
+    elif round_idx == 0 and remaining:
         # First round: no prior result to react to -- every agent starts from the same
         # dataset-derived query (RETRIEVAL_QUERY, "how do I map this kind of target given
         # this kind of dataset"), but retrieve_diverse shards one shared candidate pool
@@ -200,13 +203,17 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
 
         if round_idx == 0:
             docs = agent_docs[agent.agent_idx]
-            tqdm.write(f"{tag} retrieved {len(docs)} paper(s); writing initial pipeline.py...")
-            code = generate_initial_pipeline(code_llm, format_for_prompt(docs, settings))
+            if settings.use_rag:
+                tqdm.write(f"{tag} retrieved {len(docs)} paper(s); writing initial pipeline.py...")
+                code = generate_initial_pipeline(code_llm, format_for_prompt(docs, settings))
+            else:
+                tqdm.write(f"{tag} writing initial pipeline.py without literature...")
+                code = generate_initial_pipeline(code_llm, None)
             velocity = agent.velocity
             velocity_history = agent.velocity_history
             retrieved_papers = [d.metadata.get("paper_id", "unknown") for d in docs]
         else:
-            enriched_reflection = (
+            enriched_reflection = settings.use_rag and (
                 settings.enriched_reflection_all
                 or (agent.last_dice == state.g_best_score and settings.enriched_leader)
                 or agent.agent_idx in random_enriched_agents

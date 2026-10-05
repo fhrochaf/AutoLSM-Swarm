@@ -1,0 +1,272 @@
+# Every LLM prompt used by the swarm, in one place. Loaded and rendered by
+# agents/prompts.py::render(key, **variables).
+#
+# Placeholders are written <<name>>: the prompts contain literal braces (e.g. {0,1}), so
+# str.format would clash. render() fails loudly if a placeholder is not supplied, or if a
+# supplied variable is not used by the prompt.
+#
+# Layout (dotted keys):
+#   retrieval_query                         round-0 corpus query
+#   pipeline.{system, initial_user, apply_velocity_user, fix_user}   pipeline.py writing
+#   peer_review.{system, user}              call A  -- swarm-wide peer review of the round
+#   reflect.{system, grounding_suffix, user, enrich_system, enrich_user}   call B
+#   velocity.{system, user}                 call C
+#   fidelity.{system, user, revise_user}    optional gate after call D (config: fidelity_check):
+#                                           a judge checks the updated pipeline against the velocity,
+#                                           and a NOT_FAITHFUL verdict sends it back to the code LLM
+
+retrieval_query: |
+  Methods for landslide mapping/detection in this kind of dataset:
+  <<dataset_description>>
+
+# ---------------------------------------------------------------------------------------
+# pipeline.py writing (code LLM). Used for the round-0 pipeline, call D (apply velocity),
+# and the debug loop.
+# ---------------------------------------------------------------------------------------
+pipeline:
+  system: |
+    You develop a pipeline for pipeline of landslide mapping through remote sensing data.
+    You write a single Python module, pipeline.py, implementing a fixed contract so it can be executed and evaluated by code you do not control. You MUST implement exactly these functions:
+
+    <<required_funcs_doc>>
+
+    Rules:
+    - You may import any published, pip-installable library that fits your strategy -- including deep learning frameworks (PyTorch, TensorFlow/Keras, etc.), geospatial libraries (rasterio, GDAL, geopandas, ...), or anything else. Only real, correctly-named PyPI packages install successfully, so double-check the import name matches the actual package (e.g. `import cv2` needs the PyPI package `opencv-python`, not `cv2`; when they differ, prefer a library whose import name matches its package name, or you'll fail on a bad install rather than a bad model).
+    - `predict` must return binary {0,1} masks -- threshold internally if your model produces probabilities.
+    - Declare a module-level dict `HPARAMS` holding EVERY tunable value the pipeline depends on (learning rate, loss weights, probability threshold, dropout, epochs, batch size, augmentation strengths, any percentile/window size, ...). The code must read each of these from `HPARAMS` -- never repeat a tunable as a literal elsewhere. Values must be JSON-serializable (numbers, strings, bools, lists). This dict is how later revisions address a single parameter change exactly.
+    - Reproducibility is mandatory. At the very top of the module, before any other code, define `SEED = int(os.environ.get("AUTOLSM_SEED", "<<default_seed>>"))` (importing `os` first) and deterministically seed every source of randomness any of your imports could draw from, all from that one `SEED` -- Python's `random`, `numpy`, and the equivalent seeding call or constructor argument for every other library you import that exposes one (deep learning frameworks, gradient-boosting/classical-ML libraries, etc.). Never hardcode a seed number anywhere else and never rely on a library's default RNG behavior. Your pipeline is evaluated several times under different values of AUTOLSM_SEED and scored on the mean, so a good result must come from the strategy, not from a lucky seed.
+    - Output ONLY the Python code for pipeline.py, in a single ```python code block. No prose before or after.
+
+  initial_user: |
+    <<dataset_description>>
+
+    Retrieved literature (paper id, methods, datasets, novelty):
+    <<retrieved_papers>>
+
+    Choose ONE concrete landslide-mapping approach that these papers support for this dataset, and write pipeline.py implementing it under the fixed contract.
+    Cite the paper id(s) behind each design choice in comments.
+
+  initial_user_no_rag: |
+    <<dataset_description>>
+
+    Choose ONE concrete landslide-mapping approach that you consider well suited to this dataset,
+    and write pipeline.py implementing it under the fixed contract.
+
+  apply_velocity_user: |
+    <<dataset_description>>
+
+    Your current pipeline.py:
+
+    ```python
+    <<current_code>>
+    ```
+
+    Revision directive (velocity) to apply:
+    <<velocity>>
+
+    The reasoning that led to that directive (context, so you understand its intent; what you apply is the directive above):
+    <<velocity_reasoning>>
+
+    Apply EXACTLY the one change the directive chose, and nothing else. Keep every other line, function, `HPARAMS` value, and the seeding block as they are -- do not refactor, rename, reformat, or "improve" anything the directive does not name.
+    If the change is `CHANGE <key>: <old> -> <new>`, edit only that `HPARAMS` entry (and only the code strictly needed to keep the pipeline consistent). Output the complete revised pipeline.py.
+
+  fix_user: |
+    The following pipeline.py failed when executed:
+
+    ```python
+    <<previous_code>>
+    ```
+
+    Error:
+    <<error_message>>
+
+    Fix the module so it satisfies the contract and runs end-to-end without errors.
+    Change only what the error requires.
+    Output ONLY the corrected Python code for pipeline.py, in a single ```python code block.
+
+# ---------------------------------------------------------------------------------------
+# A. peer review (role-2 LLM): one call per round, shared by the whole swarm. Turns the
+# code-computed metric tables into the peer observation every agent reflects on.
+# ---------------------------------------------------------------------------------------
+peer_review:
+  system: |
+    You analyze the behavior of a landslide-mapping pipeline developed through remote sensing data.
+    After every round you write the report the developer reads before deciding how to change the pipeline.
+    You are given metric tables for the pipeline.
+
+    Rules:
+    - Quote numbers exactly as they appear in the tables; never invent, round differently, or infer a number that is not shown.
+    - Write for the developer: say what the pipeline's behavior is (over- or under-segments, detects landslides but draws poor masks, or the reverse; fragmented or blobby output; strong or weak on small / medium / large landslides; false alarms on landslide-free tiles; stable or unstable across seeds).
+    - Then state its common failure modes and hard tiles.
+
+  user: |
+    <<dataset_description>>
+
+    <<tables>>
+
+# ---------------------------------------------------------------------------------------
+# B. reflect (primary LLM), one call per agent: own pipeline + the round's peer review.
+# ---------------------------------------------------------------------------------------
+reflect:
+  system: |
+    You are a research agent developing a landslide detection/mapping pipeline.
+    Below: your current pipeline.py, and the behavior report of this round (an analysis of your pipeline's results).
+
+    Instruction:
+    - Tell yourself how your pipeline.py should improve, given its behavior this round.
+    - Diagnose from behavior. Explain WHY your pipeline behaves as the tables show, tying each symptom to a specific mechanism in your own code (an architecture choice, a loss term, preprocessing, a threshold, a post-processing step, or a value in its HPARAMS) -- e.g. "predicted-positive rate is 2x the true rate; my fixed threshold and unweighted loss favor over-segmentation".
+    - Return only a few bullet points of candidate directions for changing your pipeline.py. Each must be a testable hypothesis that names the metric(s) in the tables it should move. This is diagnosis, not the decision -- the velocity update step chooses which single one to act on.
+
+  grounding_suffix: |
+    Then end with exactly one line:
+    GROUNDING QUERY: <a concrete question a literature search should resolve>
+
+  user: |
+    <<dataset_description>>
+
+    Your current pipeline.py:
+    ```python
+    <<pipeline_code>>
+    ```
+
+    Behavior report of this round (scored on the validation tiles):
+    <<peer_review>>
+
+  enrich_system: |
+    You are a research agent developing a landslide detection/mapping pipeline, revisiting a self-reflective diagnosis you just wrote from your pipeline's behavior against your peers'. You flagged mechanisms you were unsure about, and are now given a handful of papers retrieved from the literature corpus targeting exactly that question.
+
+    Revise your reflection in light of this literature: where a retrieved paper actually confirms, sharpens, or contradicts one of your hypotheses, say so explicitly and cite it inline using its bracketed id exactly as it appears (e.g. [2-s2.0-12345678901]). Do not force a citation onto a point none of the retrieved papers actually bear on -- an ungrounded (but still concrete) hypothesis is better than a fabricated or tenuous citation. If none of the retrieved papers resolve your open question, say so plainly and leave that point reasoned from behavior alone.
+
+    Output the final, revised self-reflective direction (a few bullet points) -- not a full plan, not code, and no GROUNDING QUERY line this time; that step is done.
+
+  enrich_user: |
+    Your first-pass reflection this round:
+    <<reflection>>
+
+    Retrieved literature addressing your flagged open question (paper id, methods, datasets, novelty):
+    <<grounding>>
+
+# ---------------------------------------------------------------------------------------
+# C. velocity update (primary LLM), one call per agent.
+# ---------------------------------------------------------------------------------------
+velocity:
+  system: |
+    You maintain one landslide-mapping research agent's "semantic velocity": the directive for how its pipeline.py should change next.
+    Below: the previous velocity, the recent trajectory (past velocities and the score change each one produced), this round's self-reflective direction, the agent's current pipeline.py, and its best pipeline.py so far, each with its Dice.
+
+    Instruction:
+    - Use the recent trajectory as momentum: keep pushing in a direction that raised the score, and back off or change course where it lowered it or the run failed. Small score changes (under ~0.01 Dice) may be noise, not evidence -- do not over-credit or over-blame a directive for them.
+    - Choose EXACTLY ONE change to make this round -- either ONE structural mechanism (one architecture/preprocessing/loss-family/post-processing technique to add, replace, or remove) OR ONE parametric change (one entry of the pipeline's `HPARAMS` dict moved to a new value). Never both, never several of either: a velocity that bundles multiple simultaneous changes makes it impossible to tell which one actually caused next round's score to move, which breaks the momentum rule above.
+    - If the chosen change is parametric: name the exact key as it appears in the current pipeline's `HPARAMS`, and state it as exactly `CHANGE <key>: <current value> -> <new value>` on its own line, using the value actually shown in the code as <current value>.
+    - If it is structural: say precisely what to add, replace, or remove and in which function of the current pipeline.
+    - Combine the previous velocity, the fresh direction, and lessons from the best pipeline so far when choosing which single change to make.
+    - Focus on generalizable improvements, not one-off fixes.
+
+    Your answer is given in the structured format provided: a short `reasoning` (why you chose this change) and `final_velocity` (the directive and nothing else). Only `final_velocity` is passed on to the agent that edits pipeline.py, so it must be complete and self-contained.
+#    - Give the hypothesis behind the change and an EXPECTED SIGNATURE: which behavior metrics (precision, recall, false-alarm tiles, small-landslide recall, blob counts, ...) should move, and in which direction. Next round's tables will be checked against it.
+#    - Format: one line "FROM: <character of the current pipeline> -> TO: <where it is being pushed>", then the single directive (with its CHANGE line if parametric), then "EXPECTED SIGNATURE: ...", then any "DEFERRED: ..." candidates.
+
+  user: |
+    [
+    Previous velocity (revision directives from last round):
+    <<prev_velocity>>
+    ]
+
+    [
+    Recent trajectory (oldest first) -- what earlier velocities did to the score:
+    <<trajectory>>
+    ]
+
+    [
+    Your current pipeline.py scores Dice=<<current_dice>>.
+    ]
+
+    [
+    Fresh self-reflective direction from this round:
+    <<reflection>>
+    ]
+
+    [
+    Your current pipeline.py:
+    ```python
+    <<pipeline_code>>
+    ```
+    ]
+
+    [
+    Your best pipeline.py so far (Dice=<<p_best_score>>):
+    <<p_best_block>>
+    ]
+
+# ---------------------------------------------------------------------------------------
+# Fidelity gate (optional, config.fidelity_check). After call D, a judge LLM (role 2) checks that
+# the updated pipeline.py applies exactly the velocity it was given; on NOT_FAITHFUL the code LLM
+# (role 3, optionally with web search) is asked to redo it, up to config.max_fidelity_iters times.
+# ---------------------------------------------------------------------------------------
+fidelity:
+  system: |
+    You are a code reviewer checking whether an updated pipeline.py faithfully applies a revision directive,
+    not whether the code runs without errors, and not whether the directive itself is a good idea.
+
+    You are given the directive, a unified diff from the previous pipeline.py to the updated one, and the full updated pipeline.py.
+
+    Check:
+    1. The one chosen change is present and correct. For `CHANGE <key>: <old> -> <new>`: `HPARAMS[<key>]` now holds exactly <new>, and the code actually reads that value from `HPARAMS` (not a hardcoded copy). For a structural change: the described mechanism is implemented where the directive says, and is the named technique, not a lookalike.
+    2. An empty diff means the directive was not applied at all.
+
+    pipeline.py is ONLY required to implement:
+    <<required_funcs_doc>>
+
+    Dataset loading and evaluation-metric computation are handled by fixed harness code the agent never writes. Never flag their absence from pipeline.py.
+
+    The pipeline only ever receives this fixed input:
+    <<dataset_description>>
+
+    If the directive requires data, channels, or metadata outside what this dataset provides, the code cannot honor it. Do not flag its absence, and do not require the code to invent or fake that data.
+
+    Before flagging something the directive asked for that the code does not literally do, check whether a comment or docstring near the relevant logic gives an explicit, concrete reason for doing something else instead (the exact technique is infeasible given this dataset or the pipeline contract, or it was replaced by a stated, reasonable substitute).
+    Reserve NOT_FAITHFUL for requested mechanisms that are silently absent or contradicted, and for extra changes beyond the one chosen. Minor details (variable names, comments, formatting) are not violations, and neither is vague or aspirational wording in the directive that makes no concrete, checkable claim.
+
+    Answer in the structured format provided: list the concrete violations you found in `violations` (empty if none), and give your `verdict`: FAITHFUL or NOT_FAITHFUL.
+
+  user: |
+    Revision directive (velocity) that was to be applied:
+    <<velocity>>
+
+    Diff from the previous pipeline.py to the updated one:
+    ```diff
+    <<diff>>
+    ```
+
+    Updated pipeline.py (full):
+    ```python
+    <<new_code>>
+    ```
+
+  revise_user: |
+    <<dataset_description>>
+
+    You applied a revision directive (velocity) to a pipeline.py, and a reviewer found that your result does not faithfully apply it.
+
+    Revision directive (velocity):
+    <<velocity>>
+
+    The reasoning that led to that directive (context, so you understand its intent; what you apply is the directive above):
+    <<velocity_reasoning>>
+
+    Your flagged attempt at the updated pipeline.py:
+
+    ```python
+    <<flawed_code>>
+    ```
+
+    What the reviewer found:
+    <<feedback>>
+
+    <<search_hint>>
+    
+  # The pipeline.py before the directive:
+  # Redo the update starting from the pipeline.py BEFORE the directive: apply EXACTLY the one change the directive chose, implemented correctly, and nothing else -- keep every other line, function, `HPARAMS` value, and the seeding block as they are, and do not apply any deferred candidate. Output the complete revised pipeline.py in a single ```python code block.
+  # ```python
+  # <<previous_code>>
+  # ```

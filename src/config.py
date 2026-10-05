@@ -66,8 +66,8 @@ class Settings(BaseSettings):
             self.api_key_3 = os.environ.get(f"{self.llm_provider_3.upper()}_API_KEY", "")
         return self
 
-    n_agents: int = 5
-    n_rounds: int = 5
+    n_agents: int = 1
+    n_rounds: int = 10
     # Stop early if the swarm's global-best Dice hasn't improved by more than
     # p_best_epsilon for this many consecutive rounds.
     plateau_patience: int = 4
@@ -76,14 +76,14 @@ class Settings(BaseSettings):
     # (description text, array shapes, loading logic, smoke-test tile ids) flows from
     # this one name; see data/spec.py.
     dataset_name: str = "landslide4sense"
-    dataset_dir: Path = REPO_ROOT / "archive"
+    dataset_dir: Path = REPO_ROOT / "archive/TrainData"
     runs_dir: Path = REPO_ROOT / "runs_landslide4sense"
 
     # The YAML holding every LLM prompt (see agents/prompts.py): a file name resolved under src/, or a path.
     # Keep one file per prompt variant to compare; override per run without editing code with
     # PROMPTS_FILE=prompts.yaml python main.py ...  (or in .env). A run stores a
     # copy of the file it used as <run>/prompts_used.yaml.
-    prompts_file: str = "prompts_velocity_cot_multichanges.yaml"
+    prompts_file: str = "prompts_singleagent_noRag.yaml"
 
     corpus_json_dir: Path =  Path(
         "/mnt/pool/landslide/AutoLSM-Swarm/AutoLSM-Swarm/output_fullPDF_with_guardrails_singlePDFread"
@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     vector_store_dir: Path = REPO_ROOT / "database_vector_store" / "vector_store"
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     retrieval_k: int = 3
+    # Off: no corpus retrieval anywhere -- round 0 is written from the dataset description
+    # alone (prompt `pipeline.initial_user_no_rag`) and later rounds never run an enriched
+    # reflection. The no-literature baseline; pair with n_agents=1 for a single-agent run.
+    use_rag: bool = False
 
     split_ratios: dict[str, float] = {"train": 0.7, "val": 0.15, "test": 0.15}
     seed: int = 42

@@ -66,8 +66,10 @@ in one file, [`src/prompts.yaml`](src/prompts.yaml):
    `NOT_FAITHFUL` verdict sends the update back to the code LLM to redo, up to
    `max_fidelity_iters` times; while redoing it, the code LLM may use Tavily web search
    (`fidelity_web_search`, needs `TAVILY_API_KEY`) to look up the exact formula of a named
-   technique. If it is still flagged after the last revision, the latest attempt is run
-   anyway and marked `fidelity_faithful: false` in the ledger. The gate judges velocity
+   technique. If it is still flagged after the last revision, `run_unfaithful_pipeline`
+   decides: `True` (default) runs the latest attempt as it is; `False` rejects the update and
+   the agent's previous `pipeline.py` is re-run and re-scored instead. Either way the ledger
+   marks `fidelity_faithful: false`. The gate judges velocity
    applications only (not round-0 pipelines or crash fixes), and each check is logged in
    `fidelity.md` next to the pipeline.
 5. **Validation-based best tracking.** A new pipeline only replaces an agent's
@@ -75,8 +77,10 @@ in one file, [`src/prompts.yaml`](src/prompts.yaml):
    best by more than a margin `p_best_epsilon`, damping noisy fluctuations.
 
 Round 0 has no peers to review: each agent retrieves papers from the literature corpus
-(sharded so agents do not all see the same top-k) and writes its first `pipeline.py`
-directly from them.
+(by default sharded so agents do not all see the same top-k; `retrieval_strategy` also offers
+`mmr` and `cluster`, see below) and writes its first `pipeline.py` directly from them. With
+`use_rag=false` there is no retrieval at all: round 0 is written from the dataset description
+alone and later rounds never run an enriched reflection (the no-literature baseline).
 
 This project uses a **global-best (fully-connected) topology**: every agent is steered
 toward one swarm-wide best pipeline each round. Training stops after `n_rounds`, or earlier
@@ -199,8 +203,11 @@ agent's prompt.
   - [`ingest.py`](src/corpus/ingest.py) — builds the persisted Chroma index from the
     per-paper JSON summaries.
   - [`retrieve.py`](src/corpus/retrieve.py) — similarity search over that index, plus
-    `retrieve_diverse`, which shards one shared candidate pool round-robin across agents
-    so round-0 agents don't all ground themselves in the same top-k papers.
+    `retrieve_diverse`, which hands round-0 agents different papers so they don't all
+    ground themselves in the same top-k. `retrieval_strategy` (config.py / `RETRIEVAL_STRATEGY`)
+    picks how: `shard` (default: one shared candidate pool dealt out round-robin), `mmr`
+    (maximal-marginal-relevance picks from a `retrieval_pool_size` pool, dealt out round-robin),
+    or `cluster` (k-means groups of that pool, one group per agent).
   - [`pdf_extract.py`](src/corpus/pdf_extract.py) — on-demand full-text PDF extraction
     and disk caching, keyed by paper id.
 - **`src/data/`** — dataset-agnostic loading, dispatched by `settings.dataset_name`
@@ -308,6 +315,50 @@ The fidelity and enrichment prompts are only required when those features are sw
 Each run stores the file it used as `<run>/prompts_used.yaml`, and the registry records its
 name and a short hash (`prompts_file`, `prompts_sha`), so results can be traced to the exact
 prompt text; `--resume` warns if the file changed since the run started.
+
+### Ablation: no literature, single agent
+
+`use_rag=false` (config / `USE_RAG`) switches corpus retrieval off. The round-0 prompt becomes
+`pipeline.initial_user_no_rag`, which only the prompt files meant for this mode define; with
+`use_rag=false` a file lacking it is rejected at startup, and the retrieval and enrichment prompts
+are no longer required. [`src/prompts_singleagent_noRag.yaml`](src/prompts_singleagent_noRag.yaml)
+is that variant for one agent: it also drops every mention of peers, a swarm and a global best, so
+the agent only sees its own behavior report and its own best pipeline. A baseline run is
+`USE_RAG=false PROMPTS_FILE=prompts_singleagent_noRag.yaml python main.py --agents 1 --rounds 10`.
+`use_rag` is recorded in the registry next to `retrieval_strategy`, `retrieval_k`,
+`retrieval_pool_size`, `mmr_lambda` and `retrieval_filter`.
+
+### Metadata filter on retrieval
+
+At index time ([`src/corpus/ingest.py`](src/corpus/ingest.py)) each paper JSON is joined, on its
+filename stem == the CSV's `EID`, to the Scopus-export CSV at `corpus_metadata_csv` (config.py;
+`;`-delimited; `None` skips the join), adding `method_class_name`, `year`, `cited_by`,
+`source_title` and `document_type` to the metadata already stored (`paper_id`,
+`reproducibility_status`, `n_methods`, `n_datasets`). Unmatched or blank values become `"UNKNOWN"`
+(text) or `0` (numbers). `retrieval_filter` (config / `RETRIEVAL_FILTER` as JSON) is a Chroma
+`where` dict applied to every corpus retrieval — round 0 under all three strategies and the enriched
+reflection; `None` searches the whole corpus. E.g. `{"method_class_name": "CNN-based Semantic
+Segmentation"}` or `{"$and": [{"year": {"$gte": 2022}}, {"reproducibility_status": "REPRODUCIBLE"}]}`.
+Changing the CSV or its path needs `--rebuild-index` (which now drops the old collection first
+instead of appending duplicates); changing only the filter does not. A filter matching fewer than
+`retrieval_k × n_agents` papers gives agents fewer papers, and one matching none will fail.
+
+### Round-0 retrieval strategies
+
+`retrieval_strategy` (config / `RETRIEVAL_STRATEGY`) controls how round-0 papers are handed to the
+agents ([`src/corpus/retrieve.py`](src/corpus/retrieve.py)): `shard` (default) deals the top
+`retrieval_k × n_agents` papers round-robin; `mmr` picks them by maximal marginal relevance over a
+`retrieval_pool_size` pool (`mmr_lambda` trades relevance against diversity) and deals them out the
+same way; `cluster` k-means-clusters that pool on the stored embeddings into one group per agent and
+gives each agent the top papers of its group. The prompts do not change between strategies.
+
+### Results notebooks
+
+`runs_pipeline_optimization/` holds finished runs and their analysis notebooks. The single-agent
+notebooks read every run folder next to them and plot the runs on shared axes with the mean across
+runs; they also include the behavior metrics recomputed over all saved evaluation seeds (cached as
+`metrics_allseeds.csv` in each run folder, needs the validation labels once) and, for RAG-seeded
+runs, a section on which papers seeded and enriched each run.
 
 **Structured answers, independent of the prompt.** Two calls produce an answer the code has to
 read one part of, so the code fixes their shape instead of relying on prompt wording

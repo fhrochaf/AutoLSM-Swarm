@@ -44,7 +44,12 @@ class FidelityOutcome:
         parts = []
         for i, c in enumerate(self.checks, 1):
             parts.append(f"## Check {i}: {'FAITHFUL' if c['faithful'] else 'NOT_FAITHFUL'}\n\n{c['feedback'] or '(no findings)'}")
-        end = "Final pipeline passed the check." if self.faithful else "Still NOT_FAITHFUL after the last revision; the latest attempt was run anyway."
+        end = (
+            "Final pipeline passed the check." if self.faithful
+            else "Still NOT_FAITHFUL after the last revision (config.run_unfaithful_pipeline decides whether "
+                 "the latest attempt was run anyway or the update was rejected; the pipeline.py next to this "
+                 "file is the one that ran)."
+        )
         return "\n\n".join(parts + [end])
 
 

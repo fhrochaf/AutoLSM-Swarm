@@ -379,6 +379,8 @@ def reflect_and_update(
             settings.max_fidelity_iters, settings.fidelity_web_search, velocity_reasoning,
         )
         new_code = fidelity.code
+        if not fidelity.faithful and not settings.run_unfaithful_pipeline:
+            new_code = agent.pipeline_code  # update rejected: keep the previous pipeline
     if window > 0:
         history.append(VelocityRecord(round=round_idx, velocity=v, dice_before=agent.last_dice))
         history = history[-window:]

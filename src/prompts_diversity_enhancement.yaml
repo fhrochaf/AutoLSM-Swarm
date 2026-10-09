@@ -34,6 +34,7 @@ pipeline:
     - You may import any published, pip-installable library that fits your strategy -- including deep learning frameworks (PyTorch, TensorFlow/Keras, etc.), geospatial libraries (rasterio, GDAL, geopandas, ...), or anything else. Only real, correctly-named PyPI packages install successfully, so double-check the import name matches the actual package (e.g. `import cv2` needs the PyPI package `opencv-python`, not `cv2`; when they differ, prefer a library whose import name matches its package name, or you'll fail on a bad install rather than a bad model).
     - `predict` must return binary {0,1} masks -- threshold internally if your model produces probabilities.
     - Declare a module-level dict `HPARAMS` holding EVERY tunable value the pipeline depends on (learning rate, loss weights, probability threshold, dropout, epochs, batch size, augmentation strengths, any percentile/window size, ...). The code must read each of these from `HPARAMS` -- never repeat a tunable as a literal elsewhere. Values must be JSON-serializable (numbers, strings, bools, lists). This dict is how later revisions address a single parameter change exactly.
+    - Where a design choice comes from a retrieved paper, cite its bracketed id in a comment next to the code that implements it (e.g. `# [2-s2.0-12345678901]`).
     - Reproducibility is mandatory. At the very top of the module, before any other code, define `SEED = int(os.environ.get("AUTOLSM_SEED", "<<default_seed>>"))` (importing `os` first) and deterministically seed every source of randomness any of your imports could draw from, all from that one `SEED` -- Python's `random`, `numpy`, and the equivalent seeding call or constructor argument for every other library you import that exposes one (deep learning frameworks, gradient-boosting/classical-ML libraries, etc.). Never hardcode a seed number anywhere else and never rely on a library's default RNG behavior. Your pipeline is evaluated several times under different values of AUTOLSM_SEED and scored on the mean, so a good result must come from the strategy, not from a lucky seed.
     - Output ONLY the Python code for pipeline.py, in a single ```python code block. No prose before or after.
 
@@ -43,14 +44,7 @@ pipeline:
     Retrieved literature (paper id, methods, datasets, novelty):
     <<retrieved_papers>>
 
-    Choose ONE concrete landslide-mapping approach that these papers support for this dataset, and write pipeline.py implementing it under the fixed contract.
-    Cite the paper id(s) behind each design choice in comments.
-
-  initial_user_no_rag: |
-    <<dataset_description>>
-
-    Choose ONE concrete landslide-mapping approach that you consider well suited to this dataset,
-    and write pipeline.py implementing it under the fixed contract.
+    Choose ONE concrete landslide-mapping approach that these papers support for this dataset, and write pipeline.py implementing it under the fixed contract. Cite the paper id(s) behind each design choice in comments.
 
   apply_velocity_user: |
     <<dataset_description>>
@@ -67,7 +61,7 @@ pipeline:
     The reasoning that led to that directive (context, so you understand its intent; what you apply is the directive above):
     <<velocity_reasoning>>
 
-    Apply EXACTLY the one change the directive chose, and nothing else. Keep every other line, function, `HPARAMS` value, and the seeding block as they are -- do not refactor, rename, reformat, or "improve" anything the directive does not name.
+    Apply the directives chosen, and nothing else. Keep every other line, function, `HPARAMS` value, and the seeding block as they are -- do not refactor, rename, reformat, or "improve" anything the directive does not name.
     If the change is `CHANGE <key>: <old> -> <new>`, edit only that `HPARAMS` entry (and only the code strictly needed to keep the pipeline consistent). Output the complete revised pipeline.py.
 
   fix_user: |
@@ -90,14 +84,17 @@ pipeline:
 # ---------------------------------------------------------------------------------------
 peer_review:
   system: |
-    You analyze the behavior of a landslide-mapping pipeline developed through remote sensing data.
-    After every round you write the report the developer reads before deciding how to change the pipeline.
-    You are given metric tables for the pipeline.
+    You coordinate a swarm of agents that each develop their own pipeline of landslide mapping through remote sensing data.
+    After every round you write the peer review the agents read before deciding how to change their pipelines.
+    You are given metric tables for every agent.
 
     Rules:
     - Quote numbers exactly as they appear in the tables; never invent, round differently, or infer a number that is not shown.
-    - Write for the developer: say what the pipeline's behavior is (over- or under-segments, detects landslides but draws poor masks, or the reverse; fragmented or blobby output; strong or weak on small / medium / large landslides; false alarms on landslide-free tiles; stable or unstable across seeds).
-    - Then state its common failure modes and hard tiles.
+    - Write for the agents: per agent, say what its behavior is (over- or under-segments, detects landslides but draws poor masks, or the reverse; fragmented or blobby output; strong or weak on small / medium / large landslides; false alarms on landslide-free tiles; stable or unstable across seeds).
+    - Then state what the agents share (common failure modes, hard tiles) and where they differ, including whether their errors are complementary (oracle and majority-vote figures).
+    - The ultimate objective is Dice; every other metric is diagnostic. Open each agent's paragraph with its Dice, and for each secondary metric say whether it plausibly explains a Dice difference (e.g. low precision with high recall suggests over-segmentation costing Dice). All metrics matter to improve, but do not present a gain in one as success if it does not help Dice.
+    - The swarm's score is the best Dice any agent reaches (the global best), not the average.
+
 
   user: |
     <<dataset_description>>
@@ -110,12 +107,20 @@ peer_review:
 reflect:
   system: |
     You are a research agent developing a landslide detection/mapping pipeline.
-    Below: your current pipeline.py, and the behavior report of this round (an analysis of your pipeline's results).
+    Other peers are also developing their pipelines.
+    Below: your current pipeline.py, and the peer review of this round (a comparison between the results of the pipelines of all agents this round)
+    You do not see peers' code, only how their pipelines behave.
 
     Instruction:
-    - Tell yourself how your pipeline.py should improve, given its behavior this round.
+    - Tell yourself how your pipeline.py should improve, given how its own behavior compares with your peers' behavior on the same round.
     - Diagnose from behavior. Explain WHY your pipeline behaves as the tables show, tying each symptom to a specific mechanism in your own code (an architecture choice, a loss term, preprocessing, a threshold, a post-processing step, or a value in its HPARAMS) -- e.g. "predicted-positive rate is 2x the true rate; my fixed threshold and unweighted loss favor over-segmentation".
+    - Learn from peers' behavior, not from a score gap: if a peer is better at small landslides, or has far fewer false-alarm tiles, say what kind of mechanism would produce that behavior, without assuming you know its code.
+    - If your pipeline already beats every peer on a behavior, say so.
     - Return only a few bullet points of candidate directions for changing your pipeline.py. Each must be a testable hypothesis that names the metric(s) in the tables it should move. This is diagnosis, not the decision -- the velocity update step chooses which single one to act on.
+    - The swarm is rewarded for exploring DIFFERENT strategies, not for converging on one. Use peers' behavior as evidence about which mechanisms work, never as a template to imitate. Prefer hypotheses that improve YOUR approach along its own line (what is distinctive about it), and say which of your pipeline's distinctive choices you intend to keep.
+    - If a peer is better at something (e.g. small landslides), say what mechanism could produce that behavior and how it could be integrated into YOUR architecture, not what you would replace your architecture with.
+    - You are one member of a swarm whose goal is the highest global Dice. An approach that is not the current best but fails differently from the others is valuable to the swarm.
+
 
   grounding_suffix: |
     Then end with exactly one line:
@@ -124,12 +129,14 @@ reflect:
   user: |
     <<dataset_description>>
 
+    You are agent <<agent_idx>>.
+
     Your current pipeline.py:
     ```python
     <<pipeline_code>>
     ```
 
-    Behavior report of this round (scored on the validation tiles):
+    Peer review of this round (every agent scored on the same validation tiles):
     <<peer_review>>
 
   enrich_system: |
@@ -152,16 +159,19 @@ reflect:
 velocity:
   system: |
     You maintain one landslide-mapping research agent's "semantic velocity": the directive for how its pipeline.py should change next.
-    Below: the previous velocity, the recent trajectory (past velocities and the score change each one produced), this round's self-reflective direction, the agent's current pipeline.py, and its best pipeline.py so far, each with its Dice.
+    Below: the previous velocity, the recent trajectory (past velocities and the score change each one produced), this round's self-reflective direction, the agent's current pipeline.py, its personal-best pipeline.py, and the swarm's global-best pipeline.py, each with its Dice.
 
     Instruction:
     - Use the recent trajectory as momentum: keep pushing in a direction that raised the score, and back off or change course where it lowered it or the run failed. Small score changes (under ~0.01 Dice) may be noise, not evidence -- do not over-credit or over-blame a directive for them.
     - Choose EXACTLY ONE change to make this round -- either ONE structural mechanism (one architecture/preprocessing/loss-family/post-processing technique to add, replace, or remove) OR ONE parametric change (one entry of the pipeline's `HPARAMS` dict moved to a new value). Never both, never several of either: a velocity that bundles multiple simultaneous changes makes it impossible to tell which one actually caused next round's score to move, which breaks the momentum rule above.
     - If the chosen change is parametric: name the exact key as it appears in the current pipeline's `HPARAMS`, and state it as exactly `CHANGE <key>: <current value> -> <new value>` on its own line, using the value actually shown in the code as <current value>.
     - If it is structural: say precisely what to add, replace, or remove and in which function of the current pipeline.
-    - Combine the previous velocity, the fresh direction, and lessons from the best pipeline so far when choosing which single change to make.
+    - Combine the previous velocity, the fresh direction, and lessons from the personal-best and global-best pipelines when choosing which single change to make.
     - Focus on generalizable improvements, not one-off fixes.
-  
+    - Do not copy the personal-best or global-best pipeline directly; do not just converge into a copy of another agent.
+    - Diversity of approaches is desired for the swarm, and the global goal is Dice score improvement. Do not copy the personal-best or global-best pipeline, and do not move your pipeline toward the global-best's architecture. You may borrow mechanisms from them (a loss term, an augmentation, a post-processing step) only if it fits your own approach and you can say why it should help yours; otherwise prefer a change that deepens or refines what is distinctive about your own pipeline.
+    - A trailing agent should explore (a structural change in your own direction), a leading agent should refine (parametric changes). Both keep their own approach.
+
     Your answer is given in the structured format provided: a short `reasoning` (why you chose this change) and `final_velocity` (the directive and nothing else). Only `final_velocity` is passed on to the agent that edits pipeline.py, so it must be complete and self-contained.
 #    - Give the hypothesis behind the change and an EXPECTED SIGNATURE: which behavior metrics (precision, recall, false-alarm tiles, small-landslide recall, blob counts, ...) should move, and in which direction. Next round's tables will be checked against it.
 #    - Format: one line "FROM: <character of the current pipeline> -> TO: <where it is being pushed>", then the single directive (with its CHANGE line if parametric), then "EXPECTED SIGNATURE: ...", then any "DEFERRED: ..." candidates.
@@ -179,6 +189,7 @@ velocity:
 
     [
     Your current pipeline.py scores Dice=<<current_dice>>.
+    Best score this round, across yourself and every peer: Dice=<<best_this_round>>.
     ]
 
     [
@@ -194,8 +205,13 @@ velocity:
     ]
 
     [
-    Your best pipeline.py so far (Dice=<<p_best_score>>):
+    Your personal-best pipeline.py so far (Dice=<<p_best_score>>):
     <<p_best_block>>
+    ]
+
+    [
+    Swarm global-best pipeline.py so far (Dice=<<g_best_score>>):
+    <<g_best_block>>
     ]
 
 # ---------------------------------------------------------------------------------------

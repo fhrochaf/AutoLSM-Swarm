@@ -241,7 +241,7 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
                 if fidelity.revisions or not fidelity.faithful:
                     tqdm.write(
                         f"{tag} fidelity: {fidelity.revisions} revision(s); "
-                        f"{'now FAITHFUL' if fidelity.faithful else 'still NOT_FAITHFUL -- running the latest attempt anyway'}"
+                        f"{'now FAITHFUL' if fidelity.faithful else 'still NOT_FAITHFUL -- ' + ('running the latest attempt anyway' if settings.run_unfaithful_pipeline else 'update rejected, re-running the previous pipeline')}"
                     )
 
         cited_papers = peer_review.extract_cited_papers(code)

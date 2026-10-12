@@ -276,6 +276,12 @@ agents = [
 - **What records the model.** Each agent's model is recorded in `run_config.json`, the
   ledger, the agents' score table and the viewer. A resumed run keeps every agent on the
   model it started with.
+- **Per-model options.** A group's `model_kwargs` is passed to the model's LangChain class, e.g.
+  `{"reasoning_effort": "low"}`. `None` removes a default, e.g. `{"temperature": None}` for
+  reasoning models that reject a temperature.
+- **OpenAI models use the Responses API** (`use_responses_api=True`) by default. Chat
+  Completions rejects function tools together with reasoning on recent OpenAI models, and
+  agents always have tools. Override with `model_kwargs` if needed.
 - **Provider packages.** A provider needs its LangChain package installed (e.g.
   `uv add langchain-openai` for `openai`). Every model is instantiated at start-up, so a
   missing package or API key stops the run before anything is paid for.

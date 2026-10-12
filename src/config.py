@@ -24,6 +24,11 @@ class AgentGroup(BaseModel):
     model_name: str
     api_key: str = ""  # empty: read from <LLM_PROVIDER>_API_KEY in .env / the environment
     max_tokens: int = 300000
+    # Extra keyword arguments for this model's LangChain chat class (init_chat_model), e.g.
+    # {"reasoning_effort": "low"}. A value of None removes a default -- e.g. {"temperature": None}
+    # for reasoning models that reject a temperature. OpenAI models already go through the
+    # Responses API (use_responses_api=True, needed for tools + reasoning); override it here.
+    model_kwargs: dict = {}
 
     @property
     def label(self) -> str:

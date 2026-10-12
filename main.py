@@ -166,7 +166,7 @@ def main(argv: list[str] | None = None) -> None:
                 "n_agents": settings.n_agents,
                 "n_rounds": settings.n_rounds,
                 "agents": [  # one entry per agent_idx; API keys are never written
-                    g.model_dump(include={"llm_provider", "model_name", "max_tokens"}) for g in settings.agent_models()
+                    g.model_dump(include={"llm_provider", "model_name", "max_tokens", "model_kwargs"}) for g in settings.agent_models()
                 ],
             }, indent=2),
             encoding="utf-8",

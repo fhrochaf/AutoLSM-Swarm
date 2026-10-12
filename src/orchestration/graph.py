@@ -233,6 +233,8 @@ def _run_round_node(state: SwarmState, settings: Settings) -> dict:
             retrieved_papers, changed_lines = update.retrieved_papers, update.changed_lines
             fidelity = update.fidelity
             artifacts.write_text(agent_dir, "reflection.md", update.reflection)
+            if update.original_reflection:
+                artifacts.write_text(agent_dir, "reflection_original.md", update.original_reflection)
             artifacts.write_text(agent_dir, "velocity.md", update.velocity)
             if update.velocity_reasoning:
                 artifacts.write_text(agent_dir, "velocity_reasoning.md", update.velocity_reasoning)

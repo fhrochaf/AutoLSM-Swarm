@@ -66,6 +66,8 @@ def build_record(
         "plateau_patience": settings.plateau_patience,
         "velocity_history_len": settings.velocity_history_len,
         "use_rag": settings.use_rag,
+        "observation_detail": settings.observation_detail,
+        "velocity_reflection": settings.velocity_reflection,
         "retrieval_strategy": settings.retrieval_strategy,
         "retrieval_k": settings.retrieval_k,
         "retrieval_pool_size": settings.retrieval_pool_size,

@@ -304,7 +304,12 @@ Keep one file per variant and select it per run without touching code:
 PROMPTS_FILE=prompts_velocity_update_cot.yaml python main.py --agents 5 --rounds 10
 ```
 
-(or set `PROMPTS_FILE` in `.env`). The file is checked when the program starts, before any LLM call
+(or set `PROMPTS_FILE` in `.env`). Besides the default, `prompts_diversity_enhancement.yaml` pushes agents to
+keep their own approach, and `prompts_divers_enhanc_onVeloc.yaml` is the same with a looser velocity step: one
+coherent change per round (a structural mechanism with its companion hyperparameters, or up to two related
+tweaks), a preference for adopting literature candidates over further tuning (with the paper id kept in
+`final_velocity`), no ban on borrowing from the best pipelines, and a fidelity judge that accepts the companion
+hyperparameters. The file is checked when the program starts, before any LLM call
 or training is paid for. Only two things stop a run, each with the file name and the problem:
 a file that does not exist, and a prompt that an enabled feature needs but the file lacks
 (there is nothing to send). Placeholders never stop a run: a prompt may leave them out (e.g.
@@ -351,6 +356,38 @@ agents ([`src/corpus/retrieve.py`](src/corpus/retrieve.py)): `shard` (default) d
 `retrieval_pool_size` pool (`mmr_lambda` trades relevance against diversity) and deals them out the
 same way; `cluster` k-means-clusters that pool on the stored embeddings into one group per agent and
 gives each agent the top papers of its group. The prompts do not change between strategies.
+
+### Observation detail
+
+`observation_detail` (config / `OBSERVATION_DETAIL`) sets what the peer-review step shows about each
+round. `basic` (default) is the aggregate tables of [`src/eval/observe.py`](src/eval/observe.py).
+`detailed` appends the tile-level section of [`src/eval/observe_detail.py`](src/eval/observe_detail.py),
+which both the peer-review LLM and every agent's reflection then see:
+
+- **Stratified results**: tile Dice on landslide tiles, and the false-alarm share on landslide-free
+  tiles, by landslide size, number of landslide objects, and terciles of mean slope / elevation /
+  NDVI of the tile's input (the terrain strata come from the dataset spec's optional
+  `tile_descriptors`, computed once per run and cached as `_tile_descriptors.npz`).
+- **Object-level error types**: the fate of every landslide object (missed, under-covered,
+  fragmented, detected; loss rate by object size) and of every predicted blob (spurious, merged).
+- **Persistent difficulty**: landslide tiles grouped as solved by most pipelines, contested (some
+  pipeline solves them, most do not) or persistently hard, and landslide-free tiles as clean,
+  intermittent or persistent false alarms, from every earlier non-collapsed pipeline of the run
+  (per-tile stats cached as `tile_stats.npz` next to each pipeline and back-filled from the saved
+  predictions when absent). Groups are described by their make-up, never by tile id, so agents learn
+  what makes tiles hard rather than tuning to named validation tiles; it also shows whether the swarm's
+  Dice on the hard groups is improving round by round.
+
+The extra text is about 2k tokens with 10 agents, added to the peer-review prompt and to each agent's reflection prompt; computing it takes about 10 s per round (the first review of a run also back-fills the per-tile cache from the saved predictions).
+
+### Reflection read by the velocity step
+
+When an agent's reflection is enriched with retrieved literature, the enrichment rewrites it around the papers and
+drops most of the behavioral numbers, and the velocity step sees nothing of the peer-review tables except what
+the reflection carries. `velocity_reflection` (config / `VELOCITY_REFLECTION`) sets what the velocity step reads:
+`original+enriched` (default) the original reflection followed by the enriched one, `enriched` only the enriched
+one (the earlier behavior). `reflection.md` stays the enriched text; the original is saved next to it as
+`reflection_original.md` for the rounds where the enrichment ran. Agents without enrichment are unaffected.
 
 ### Results notebooks
 

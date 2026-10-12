@@ -88,6 +88,17 @@ def load_smoke_sample(dataset_dir: Path, tile_ids: list[int]) -> tuple[np.ndarra
     return np.stack(imgs, axis=0), np.stack(masks, axis=0)
 
 
+def tile_descriptors(X: np.ndarray) -> dict[str, np.ndarray]:
+    """Mean slope (channel 12), mean elevation (13) and mean NDVI (B8 vs B4 = channels 7, 3)
+    per tile, for the detailed observation's terrain strata."""
+    b8, b4 = X[..., 7].astype(np.float64), X[..., 3].astype(np.float64)
+    return {
+        "slope": X[..., 12].mean(axis=(1, 2), dtype=np.float64),
+        "elevation": X[..., 13].mean(axis=(1, 2), dtype=np.float64),
+        "NDVI": ((b8 - b4) / (b8 + b4 + 1e-6)).mean(axis=(1, 2)),
+    }
+
+
 # Verified once against the dataset with seed=42: tiles 1, 4 have at least one
 # landslide pixel; 8, 10 have none. Re-verify when changing the seed or split ratios.
 SPEC = DatasetSpec(
@@ -98,4 +109,5 @@ SPEC = DatasetSpec(
     smoke_tile_ids=[1, 4, 8, 10],
     load_split=load_split,
     load_smoke_sample=load_smoke_sample,
+    tile_descriptors=tile_descriptors,
 )

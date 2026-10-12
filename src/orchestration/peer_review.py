@@ -50,7 +50,8 @@ from agents.prompts import DATASET_DESCRIPTION, render
 from agents.structured import VelocityAnswer, invoke_structured
 from config import Settings
 from corpus.retrieve import format_for_prompt, retrieve
-from eval import observe
+from data.registry import get_dataset_spec
+from eval import observe, observe_detail
 from orchestration.state import AgentState, SwarmState, VelocityRecord
 
 settings = Settings()
@@ -130,6 +131,28 @@ class PeerReview:
         return f"{self.table_text}\n\n### Coordinator's comparative report\n{self.report}"
 
 
+def _detailed_observation(
+    preds: dict[int, np.ndarray], y_val: np.ndarray, state: SwarmState, settings: Settings,
+    runs_dir: Path, prev_round: int, table_seed: int,
+) -> str:
+    """The detailed tile-level section (eval/observe_detail.py): stratified results,
+    object-level error types, and the persistent-difficulty history of every earlier
+    pipeline of this run (per-tile stats cached next to each pipeline, back-filled from
+    the saved predictions when absent)."""
+    run_dir = runs_dir / state.run_id
+    descriptors = observe_detail.tile_descriptors_cached(
+        run_dir / "_tile_descriptors.npz", Path(state.data_npz_path), get_dataset_spec(settings.dataset_name).tile_descriptors
+    )
+    entries = []
+    for r in range(prev_round + 1):
+        for a in state.agents:
+            d = artifacts.agent_round_dir(runs_dir, state.run_id, r, a.agent_idx)
+            entries.append((r, a.agent_idx, artifacts.val_preds_path(d, table_seed), d / "tile_stats.npz"))
+    return observe_detail.format_detail(
+        preds, y_val, observe_detail.make_strata(y_val, descriptors), observe_detail.object_size_edges(y_val), entries
+    )
+
+
 def run_peer_review(
     peer_review_llm: BaseChatModel, state: SwarmState, settings: Settings, runs_dir: Path
 ) -> PeerReview:
@@ -169,6 +192,8 @@ def run_peer_review(
             },
         }
     table_text = observe.format_comparison(comparison, failed, seed_dice, table_seed)
+    if settings.observation_detail == "detailed" and preds:
+        table_text += "\n" + _detailed_observation(preds, y_val, state, settings, runs_dir, prev_round, table_seed)
 
     round_path = artifacts.round_dir(runs_dir, state.run_id, prev_round)
     report_path = round_path / "peer_review.md"
@@ -328,6 +353,23 @@ class PipelineUpdate:
     changed_lines: int
     fidelity: FidelityOutcome | None = None  # None when the gate is off
     velocity_reasoning: str = ""  # the `reasoning` field of the velocity answer ("" if the LLM gave none)
+    # The reflection as written before the literature enrichment (with its GROUNDING QUERY line);
+    # "" when no enrichment ran. `reflection` above is the enriched one.
+    original_reflection: str = ""
+
+
+def combine_reflections(original: str, enriched: str) -> str:
+    """What the velocity step reads when an agent's reflection was enriched: the original
+    diagnosis, written from the behavior tables (numbers, hypotheses tied to its own code, the
+    open question it asked the literature), followed by the version revised against the
+    retrieved papers. The enrichment rewrites the reflection around the papers and drops most
+    of the behavioral evidence, which the velocity step has no other way to see."""
+    return (
+        "### Initial diagnosis, written from my pipeline's behavior before consulting the literature\n"
+        f"{original.strip()}\n\n"
+        "### The same diagnosis revised after consulting the retrieved papers\n"
+        f"{enriched.strip()}"
+    )
 
 
 def reflect_and_update(
@@ -354,17 +396,25 @@ def reflect_and_update(
 
     enriched_reflection = enriched_reflection and settings.use_rag
     reflection = reflect(llm, agent, review, enriched_reflection)
+    original_reflection = ""   # the pre-enrichment text, kept only when the enrichment ran
+    velocity_reflection = reflection   # what the velocity step reads
     docs = []
     if enriched_reflection:
+        original_reflection = reflection
         draft, query = extract_grounding_query(reflection)
         docs = retrieve(query, settings)
         reflection = enrich_reflection(llm, draft, format_for_prompt(docs, settings))
+        velocity_reflection = (
+            combine_reflections(original_reflection, reflection)
+            if settings.velocity_reflection == "original+enriched"
+            else reflection
+        )
     retrieved_paper_ids = [d.metadata.get("paper_id", "unknown") for d in docs]
 
     window = settings.velocity_history_len
     shown = history[-window:] if window > 0 else []
     v, velocity_reasoning = velocity_update(
-        llm, agent.velocity, reflection, agent.pipeline_code, agent.p_best_code, g_best_code,
+        llm, agent.velocity, velocity_reflection, agent.pipeline_code, agent.p_best_code, g_best_code,
         shown, agent.last_dice, agent.p_best_score, g_best_score,
         _best_score(list(review.scores.values())),
     )
@@ -386,5 +436,5 @@ def reflect_and_update(
         history = history[-window:]
     return PipelineUpdate(
         new_code, v, reflection, history, retrieved_paper_ids,
-        count_changed_lines(agent.pipeline_code, new_code), fidelity, velocity_reasoning,
+        count_changed_lines(agent.pipeline_code, new_code), fidelity, velocity_reasoning, original_reflection,
     )

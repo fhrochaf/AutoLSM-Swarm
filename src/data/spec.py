@@ -39,6 +39,11 @@ class DatasetSpec:
         least one tile with a positive label and one without, used by
         pipeline_contract.py's smoke_test. Must be re-verified for each new dataset.
     load_split / load_smoke_sample: the actual per-dataset loading logic.
+    tile_descriptors: optional. X (N, ...) -> {name: (N,) float array}, a few per-tile
+        summaries of the *input* (e.g. mean slope, mean NDVI). The detailed observation
+        (settings.observation_detail) groups tiles into terciles of each descriptor to show
+        where pipelines win, lose and raise false alarms; without it only the label-based
+        strata (landslide size, number of objects) are shown.
     """
 
     name: str
@@ -48,3 +53,4 @@ class DatasetSpec:
     smoke_tile_ids: list[int]
     load_split: LoadSplitFn
     load_smoke_sample: LoadSmokeSampleFn
+    tile_descriptors: "Callable[[np.ndarray], dict[str, np.ndarray]] | None" = None

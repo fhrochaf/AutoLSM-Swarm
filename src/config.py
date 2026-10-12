@@ -134,6 +134,21 @@ class Settings(BaseSettings):
     # MMR trade-off: 1.0 = pure similarity to the query, 0.0 = pure diversity.
     mmr_lambda: float = 0.6
 
+    # What the peer-review step shows about each round (eval/observe.py, eval/observe_detail.py):
+    #   "basic"    the aggregate tables (pixel / tile / object level, by landslide size, across agents)
+    #   "detailed" the basic tables plus stratified results (landslide size, object count, terrain), the
+    #              fate of every landslide object and predicted blob, and a summary of the tiles the whole
+    #              swarm keeps failing on (described by their characteristics, never by tile id)
+    observation_detail: Literal["basic", "detailed"] = "basic"
+
+    # What the velocity step reads as "this round's reflection" when an agent's reflection was enriched
+    # with retrieved literature (the enrichment rewrites the reflection around the papers and drops most
+    # of the behavioral numbers):
+    #   "original+enriched" the original reflection followed by the enriched one
+    #   "enriched"          only the enriched one (the original behavior)
+    # The saved reflection.md is the enriched text either way; the original is saved as reflection_original.md.
+    velocity_reflection: Literal["enriched", "original+enriched"] = "original+enriched"
+
     split_ratios: dict[str, float] = {"train": 0.7, "val": 0.15, "test": 0.15}
     seed: int = 42
 

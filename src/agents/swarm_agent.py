@@ -40,9 +40,9 @@ _WRITTEN_CHECK_RE = re.compile(
 
 
 def _chat_model(
-    provider: str, model: str, api_key: str, max_tokens: int, temperature: float, model_kwargs: dict | None = None
+    provider: str, model: str, api_key: str, max_tokens: int, model_kwargs: dict | None = None
 ) -> BaseChatModel:
-    params: dict = {"temperature": temperature, "max_tokens": max_tokens}
+    params: dict = {"max_tokens": max_tokens}
     if provider == "openai":
         # Chat Completions rejects function tools together with reasoning on recent OpenAI models;
         # the Responses API supports both.
@@ -59,14 +59,14 @@ def make_llm(settings: Settings, role: int) -> BaseChatModel:
     """The chat model of a non-agent role (config.py): 2 = observer, 3 = checker."""
     return _chat_model(
         getattr(settings, f"llm_provider_{role}"), getattr(settings, f"model_name_{role}"),
-        getattr(settings, f"api_key_{role}"), getattr(settings, f"max_tokens_{role}"), settings.temperature,
+        getattr(settings, f"api_key_{role}"), getattr(settings, f"max_tokens_{role}"),
     )
 
 
 def make_agent_llm(settings: Settings, agent_idx: int) -> BaseChatModel:
     """The chat model swarm agent `agent_idx` runs on (its group in settings.agents)."""
     g = settings.agent_models()[agent_idx]
-    return _chat_model(g.llm_provider, g.model_name, g.api_key, g.max_tokens, settings.temperature, g.model_kwargs)
+    return _chat_model(g.llm_provider, g.model_name, g.api_key, g.max_tokens, g.model_kwargs)
 
 
 def invoke_agent(

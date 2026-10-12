@@ -15,8 +15,8 @@ population of agents searches the published methodology space in parallel, each
 developing its own pipeline while learning from its peers through conversation.
 
 > Earlier versions of this project adapted AgentPSO's particle-swarm loop (peer review →
-> reflect → velocity → apply, with a fidelity judge). That design is preserved in git history
-> and in [`obsolete/`](obsolete/); this branch (`dev_conversational_agents`)
+> reflect → velocity → apply, with a fidelity judge). That design is preserved in git history;
+> this branch (`dev_conversational_agents`)
 > replaces it with the conversational design below.
 
 ## Methodology
@@ -393,8 +393,8 @@ Every prompt lives in one YAML file, [`src/prompts.yaml`](src/prompts.yaml) by d
 
 The file is validated at start-up. A missing prompt stops the run. A placeholder the code
 does not supply only produces a warning. Each run keeps a copy of the file (`prompts_used.yaml`)
-and the registry stores its hash. The PSO-era prompt variants are kept in
-[`obsolete/prompts/`](obsolete/prompts/); they do not work with this code.
+and the registry stores its hash. The PSO-era prompt variants are in git history (before this
+branch); they do not work with this code.
 
 ### Metadata filter on retrieval
 

@@ -1,100 +1,114 @@
 # AutoLSM-Swarm
 
-A swarm of LLM agents that search the landslide-mapping literature and evolve their own
-landslide detection/segmentation pipelines, adapting the particle-swarm skill-evolution
-framework **AgentPSO** (Hwang et al., 2026) from general LLM reasoning to a concrete
-Earth-observation task: mapping landslides from satellite imagery.
+A swarm of LLM agents that search the landslide-mapping literature, write their own
+landslide detection/segmentation pipelines, and **talk to each other** about how to improve
+them. Each agent is a LangChain agent (`create_agent`) with tools for the literature corpus
+(RAG) and the web. After every round the agents compare results and discuss strategies on a
+shared blackboard. They can ask a hypothesis checker to test a claim against everyone's
+predictions. Then each one writes its next pipeline.
 
 Hundreds of landslide-mapping methods have been published, no single one generalizes
 across regions/sensors, and reproducing them one at a time to find the best combination
 for a given dataset does not scale — only ~20% of papers on the topic even release code
 (see the corpus survey below). Instead of a human replicating papers sequentially, a
 population of agents searches the published methodology space in parallel, each
-converging on its own pipeline while learning from its peers' results.
+developing its own pipeline while learning from its peers through conversation.
 
-![alt text](diagram.png)
+> Earlier versions of this project adapted AgentPSO's particle-swarm loop (peer review →
+> reflect → velocity → apply, with a fidelity judge). That design is preserved in git history
+> and in [`obsolete/`](obsolete/); this branch (`dev_conversational_agents`)
+> replaces it with the conversational design below.
 
 ## Methodology
 
-Each agent is a "particle" whose **position is its `pipeline.py`** — the single artifact
-it owns and the thing that is scored. There is no separate natural-language strategy
-document to keep in sync with the code: the score is optimized on the code itself. The
-velocity is still natural-language text, as in AgentPSO. Every round
-follows a five-step loop
-([`src/orchestration/graph.py`](src/orchestration/graph.py),
-[`src/orchestration/peer_review.py`](src/orchestration/peer_review.py)); all prompts live
-in one file, [`src/prompts.yaml`](src/prompts.yaml):
+Every round runs through one LangGraph `StateGraph`
+([`src/orchestration/graph.py`](src/orchestration/graph.py)). All prompts live in
+[`src/prompts.yaml`](src/prompts.yaml).
 
-1. **Independent solving.** Every agent runs its current `pipeline.py`
-   (preprocess → build/train a model → predict) against the fixed train/val split, once
-   per evaluation seed (`eval_seeds` in `src/config.py`, up to `--n-seeds N` of them). A
-   pipeline's score is its **mean Dice over those seeds**; the per-seed Dice and their
-   spread are recorded too.
-2. **Peer review** (LLM call *A*, one per round, shared by the swarm). Every agent's
-   predictions on the same validation tiles are turned, by deterministic code
-   ([`src/eval/observe.py`](src/eval/observe.py)), into text tables of how each pipeline
-   *behaves*: precision/recall, over- vs under-segmentation, tile-level detection and
-   false-alarm tiles, object-level recall and fragmentation, performance by landslide
-   size, complementarity between agents, and Dice across seeds. The peer-review LLM writes
-   a comparative report on those tables (the exact tables are always passed along with it,
-   so a misquoted number can be checked). Peers' *code* is never part of it — as in
-   AgentPSO, where peers' skills are excluded — so an agent has to infer *why* something
-   works instead of copying it.
-3. **Reflect** (LLM call *B*, per agent). From nothing but its own `pipeline.py` and this
-   round's peer review, the agent works out how its pipeline should improve given how its
-   behavior compares with its peers'. Optionally (`enriched_reflection_all`,
-   `random_enriched_reflection`, or automatically for the current global-best holder), the
-   reflection closes with one explicit `GROUNDING QUERY: ...` line that is used,
-   unmodified, as a corpus search query, and a second pass (`GroundReflection`) revises the
-   reflection against the retrieved papers, citing a specific technique (`[paper_id]`)
-   where one actually bears on it.
-4. **Velocity update** (LLM call *C*, per agent). Merges the grounded reflection with the
-   previous velocity, the recent trajectory (past velocities and the Dice each one
-   produced), the agent's own personal-best pipeline and the swarm's global-best pipeline
-   into one directive: with the default prompts a single `CHANGE <HPARAMS key>: old -> new`
-   or one structural mechanism; with the multi-change prompts (see "Prompt variants") a
-   coherent set of them. How many changes a velocity may hold is decided by the prompts, not
-   the code. Then **call *D*** turns the current `pipeline.py` and that velocity into the next
-   `pipeline.py`, changing nothing the velocity does not name. Every pipeline declares its tunables in a module-level `HPARAMS` dict, so a
-   parametric change is exact and the size of every move is measurable
-   (`changed_lines`, `hparams_changed` in the ledger).
-   **Optional fidelity gate** (`fidelity_check` in `src/config.py`, on by default). Right
-   after call *D*, a judge LLM ([`src/agents/fidelity.py`](src/agents/fidelity.py)) reads the
-   velocity, the diff from the previous to the updated `pipeline.py`, and the updated code,
-   and decides whether the chosen change was applied correctly and nothing else changed (its
-   prompts describe the one-change rule, so leave the gate off with the multi-change prompts). A
-   `NOT_FAITHFUL` verdict sends the update back to the code LLM to redo, up to
-   `max_fidelity_iters` times; while redoing it, the code LLM may use Tavily web search
-   (`fidelity_web_search`, needs `TAVILY_API_KEY`) to look up the exact formula of a named
-   technique. If it is still flagged after the last revision, `run_unfaithful_pipeline`
-   decides: `True` (default) runs the latest attempt as it is; `False` rejects the update and
-   the agent's previous `pipeline.py` is re-run and re-scored instead. Either way the ledger
-   marks `fidelity_faithful: false`. The gate judges velocity
-   applications only (not round-0 pipelines or crash fixes), and each check is logged in
-   `fidelity.md` next to the pipeline.
-5. **Validation-based best tracking.** A new pipeline only replaces an agent's
-   personal-best (or the swarm's global-best) if its mean Dice improves on the previous
-   best by more than a margin `p_best_epsilon`, damping noisy fluctuations.
+```
+START → seed → build_0 → … → build_{N-1} → update_bests → observer ──(last round / plateau)──→ finalize → END
+                 ▲                                            │
+                 │                                            ▼
+                 └──(cycles done / all PASS)── next_speaker ⇄ talk_i ──(check request)──→ hypothesis_checker ─┐
+                                                    ▲                                                          │
+                                                    └──────────────────────────────────────────────────────────┘
+```
 
-Round 0 has no peers to review: each agent retrieves papers from the literature corpus
-(by default sharded so agents do not all see the same top-k; `retrieval_strategy` also offers
-`mmr` and `cluster`, see below) and writes its first `pipeline.py` directly from them. With
-`use_rag=false` there is no retrieval at all: round 0 is written from the dataset description
-alone and later rounds never run an enriched reflection (the no-literature baseline).
+1. **Seeding** (`seed`, round 0 only). Each agent gets its own papers from the literature
+   corpus. `retrieval_strategy` (`shard` / `mmr` / `cluster`) keeps agents from all starting
+   from the same top-k papers. With `use_rag=false` there is no corpus at all: agents start
+   from the dataset description alone.
+2. **Build** (`build_i`, one node per agent, run in sequence). Agent *i* writes its
+   `pipeline.py`. In round 0 it works from its seed papers. In later rounds it works from the
+   observer's report, the global-best pipeline, the finished blackboard conversation, and its
+   own current pipeline, personal-best pipeline and notebook. It may call `search_corpus` and
+   `web_search` while writing. The pipeline is run right away: one `driver.py` subprocess per
+   evaluation seed, and a crash goes back to the same agent to fix, up to `max_debug_iters`
+   times ([`src/agents/runner.py`](src/agents/runner.py)). Its score is the **mean Dice over
+   the evaluation seeds**. Along with the code the agent writes a short private **notebook**.
+   The notebook and its pipelines are all it carries into the next round; its context is
+   otherwise rebuilt fresh every time.
+3. **Best tracking** (`update_bests`). A pipeline replaces an agent's personal-best, or the
+   swarm's global-best, only if its Dice improves on it by more than `p_best_epsilon`.
+4. **Observer** (`observer`). Deterministic code
+   ([`src/eval/observe.py`](src/eval/observe.py), plus
+   [`observe_detail.py`](src/eval/observe_detail.py) when `observation_detail="detailed"`)
+   turns every agent's predictions on the same validation tiles into tables of how each
+   pipeline *behaves*:
+   - precision/recall and over- vs under-segmentation
+   - tile- and object-level detection, and false-alarm tiles
+   - results by landslide size
+   - complementarity between agents
+   - Dice across seeds
 
-This project uses a **global-best (fully-connected) topology**: every agent is steered
-toward one swarm-wide best pipeline each round. Training stops after `n_rounds`, or earlier
-if the global-best Dice has not improved for `plateau_patience` consecutive rounds.
+   The OBSERVER agent (role-2 LLM) writes a comparative report on those tables. It describes
+   and does not prescribe. Report and tables go into every agent's **shared** context.
+5. **Conversation** (`next_speaker` ⇄ `talk_i`). The agents take turns round-robin on the
+   **blackboard**, a shared list of messages. The order rotates every round, and there are
+   `conversation_cycles` cycles.
+   - **What an agent reads.** Every agent reads the same shared context: last round's scores,
+     the observer's report and tables, the global-best pipeline and the board so far. It also
+     reads its own private context: its current pipeline, its personal-best pipeline and its
+     notebook.
+   - **What an agent does on its turn.** It posts one message or answers `PASS`. It may first
+     use `search_corpus` / `web_search`; tool results stay private unless it chooses to share
+     them.
+   - **Early stop.** A cycle in which every agent passes ends the conversation early.
+   - **Goal.** The prompts aim the discussion at the swarm's global Dice while asking each
+     agent to keep a direction of its own.
+6. **Hypothesis checks** (`talk_i → hypothesis_checker`).
+   - **Asking.** During its turn an agent may call `request_hypothesis_check(question)`. After
+     the turn, the graph hands control to the HYPOTHESIS CHECKER
+     ([`src/agents/checker.py`](src/agents/checker.py), role-3 LLM).
+   - **Running.** The checker writes Python analysis scripts and runs them (`run_analysis`)
+     in a subprocess over this round's validation predictions of every agent and the
+     validation ground truth. It sees no images, no train split, and never the test split.
+   - **Answering.** It then posts its numbers on the blackboard.
+   - **Limits.** At most `max_checks_per_round` checks per round, one per turn.
+7. After the conversation the next round starts at step 2. The run stops after `n_rounds`,
+   or earlier if the global-best Dice has not improved for `plateau_patience` consecutive
+   rounds.
 
 Generated pipelines must satisfy a fixed contract
-([`src/agents/pipeline_contract.py`](src/agents/pipeline_contract.py)) —
-`preprocess(X) -> X`, `build_model(config) -> model`, `train(model, X, y) -> model`,
-a `.predict(X)` returning binary masks, and a JSON-serializable `HPARAMS` dict — which is
-smoke-tested on a handful of fixed tiles before a pipeline is trusted to run on the full
-split. If a pipeline crashes (under any seed) or violates the contract, its traceback is
-fed back to the LLM in a bounded generate/debug loop (`max_debug_iters`) before the round
-gives up on it
-([`src/agents/runner.py`](src/agents/runner.py)).
+([`src/agents/pipeline_contract.py`](src/agents/pipeline_contract.py)):
+- `preprocess(X) -> X`, `build_model(config) -> model` and `train(model, X, y) -> model`
+- a `.predict(X)` that returns binary masks
+- a JSON-serializable `HPARAMS` dict
+
+A pipeline is smoke-tested on a handful of fixed tiles before it is trusted to run on the
+full split. Agents never write the scoring code: Dice/IoU and every observer metric come
+from [`src/eval/`](src/eval/).
+
+## Status
+
+| Milestone | State |
+|---|---|
+| Dataset layer, pipeline contract, subprocess runner, deterministic metrics | done (carried over) |
+| Literature corpus RAG (seeding strategies, metadata filter) | done (carried over) |
+| Conversational swarm: create_agent agents, observer, blackboard, hypothesis checker | implemented; offline graph tests pass (`tests/`), first live runs pending |
+| SQLite checkpointing with mid-conversation resume | implemented; tested offline |
+| Run viewer (`frontend/`): browse runs, agent inputs/prompts, pipelines, observer, blackboard, checks | done |
+| Analysis notebooks for conversational runs | not started (the notebooks in `runs_pipeline_optimization/` read the old PSO run layout) |
 
 ## Dataset
 
@@ -113,7 +127,7 @@ behind a single `DatasetSpec`
 up by `settings.dataset_name` via a registry
 ([`src/data/registry.py`](src/data/registry.py)). Every LLM-facing description of the
 dataset (`DATASET_DESCRIPTION`, the pipeline contract's array-shape doc-string,
-reflection prompts, retrieval query) and the actual loading code
+agent and observer prompts, retrieval query) and the actual loading code
 ([`src/data/dataset.py`](src/data/dataset.py)) are all derived from that one spec —
 switching datasets never means editing prompts or loader code by hand.
 
@@ -145,108 +159,90 @@ switching datasets never means editing prompts or loader code by hand.
    dataset's `name`, and `dataset_dir` at where its files live on disk.
 
 Nothing outside `src/data/` needs to change — `preprocess`/`build_model`/`train`'s
-contract shapes and the pipeline/reflection prompts all pick up the new
+contract shapes and the agent prompts all pick up the new
 dataset automatically through the spec.
+
 
 ## Literature corpus
 
-Agents ground their pipelines in retrieved papers rather than generic knowledge — both
-when a pipeline is first written (round 0) and, for the agents chosen for an enriched
-reflection, in later rounds too (`GroundReflection`, see Methodology above). The corpus is a set of ~300 landslide-mapping papers, each pre-summarized
-into a structured JSON (methods, datasets, reported novelty, reproducibility status)
-and indexed into a local Chroma vector store for retrieval
-([`src/corpus/ingest.py`](src/corpus/ingest.py),
-[`src/corpus/retrieve.py`](src/corpus/retrieve.py)). This corpus — including the
-reproducibility survey mentioned above (only ~20% of 2020–2025 automated
-landslide-mapping papers publish code) — is browsable at
-**[fhrochaf.github.io/LSM_ReproViewer](https://fhrochaf.github.io/LSM_ReproViewer/)**.
-Retrieved summaries are hydrated with an excerpt of each paper's actual full text on
-demand (extracted once via `pypdf`, then disk-cached —
-[`src/corpus/pdf_extract.py`](src/corpus/pdf_extract.py)) before being stuffed into an
-agent's prompt.
+Agents ground their pipelines in retrieved papers rather than generic knowledge. They are
+seeded with papers in round 0, and they can query the corpus at any time through their
+`search_corpus` tool, while writing a pipeline and during the conversation. The corpus is a
+set of ~300 landslide-mapping papers.
+- **Format.** Each paper is pre-summarized into a structured JSON (methods, datasets,
+  reported novelty, reproducibility status) and indexed into a local Chroma vector store
+  ([`src/corpus/ingest.py`](src/corpus/ingest.py),
+  [`src/corpus/retrieve.py`](src/corpus/retrieve.py)).
+- **Browsing.** The corpus is browsable at
+  **[fhrochaf.github.io/LSM_ReproViewer](https://fhrochaf.github.io/LSM_ReproViewer/)**,
+  including the reproducibility survey mentioned above (only ~20% of 2020–2025 automated
+  landslide-mapping papers publish code).
+- **Full text.** Retrieved summaries are hydrated on demand with an excerpt of each paper's
+  actual full text, extracted once via `pypdf` and then disk-cached
+  ([`src/corpus/pdf_extract.py`](src/corpus/pdf_extract.py)). Excerpts are capped at
+  `full_text_char_cap` per paper for seeding and `rag_tool_char_cap` per paper for tool
+  calls.
 
 ## Module overview
 
-- [`main.py`](main.py) — CLI entry point; wires config, the RAG index, the cached
-  dataset, and the round-loop graph together, then runs (or resumes) a swarm.
-- [`src/config.py`](src/config.py) — the single `Settings` object (pydantic-settings,
-  loaded from `.env`) every other module imports: LLM provider/model, swarm size,
-  round/plateau/epsilon hyperparameters, `dataset_name`/`dataset_dir` and corpus paths,
-  retrieval settings.
-- **`src/agents/`** — everything about one agent's own write/run/debug cycle:
-  - [`codegen.py`](src/agents/codegen.py) — LLM calls that write the round-0
-    `pipeline.py` from retrieved papers, apply one velocity to a pipeline (call *D*), redo
-    an update the fidelity judge flagged (optionally with Tavily web search), or fix a
-    pipeline that crashed.
-  - [`fidelity.py`](src/agents/fidelity.py) — the optional gate after call *D*: a judge LLM
-    checks the updated `pipeline.py` against the velocity and sends `NOT_FAITHFUL` updates
-    back to the code LLM, up to `max_fidelity_iters` times.
-  - [`driver.py`](src/agents/driver.py) — standalone subprocess entry point that
-    actually executes one `pipeline.py` end-to-end (preprocess → train → evaluate) under
-    one seed (`AUTOLSM_SEED`) in isolation from the orchestrator, saving its validation
-    predictions and auto-installing any library the agent imports.
-  - [`runner.py`](src/agents/runner.py) — the per-agent loop: runs the pipeline under
-    every evaluation seed and, on a crash under any of them, feeds the traceback back for
-    a fix, up to `max_debug_iters`.
-  - [`pipeline_contract.py`](src/agents/pipeline_contract.py) — the fixed interface
-    every generated pipeline must implement (including `HPARAMS`), plus the smoke test
-    that checks it cheaply before a full run.
-  - [`prompts.py`](src/agents/prompts.py) — loads the prompts YAML (default
-    [`src/prompts.yaml`](src/prompts.yaml)), the one file holding every prompt of a run, and
-    renders its `<<placeholders>>`. Which file is read is `prompts_file` in `src/config.py`
-    (see "Prompt variants" below); it is validated at start-up.
-  - [`artifacts.py`](src/agents/artifacts.py) — per-run/round/agent file I/O
-    (`<runs_dir>/<run_id>/round_<t>/agent_<i>/{pipeline.py,reflection.md,velocity.md,...}`).
-  - [`text_utils.py`](src/agents/text_utils.py) — small helpers for cleaning LLM output
-    (stripping code fences, extracting code blocks).
+- [`main.py`](main.py) — CLI entry point. It wires config, the RAG index, the cached dataset
+  and the swarm graph together, then runs, resumes or extends a run.
+- [`src/config.py`](src/config.py) — the single `Settings` object (pydantic-settings, loaded
+  from `.env`):
+  - LLM roles, swarm size, rounds
+  - conversation and checker limits
+  - tool settings, retrieval settings
+  - dataset and corpus paths
+- **`src/agents/`** — the agents and what they run:
+  - [`swarm_agent.py`](src/agents/swarm_agent.py) — the `create_agent()` factory every LLM
+    actor goes through. It adds retry and tool-call-limit middleware. It provides
+    `build_pipeline` (pipeline.py + notebook), `take_turn` (a blackboard post / PASS / check
+    request) and `fix_pipeline` (the debug loop).
+  - [`context.py`](src/agents/context.py) — builds an agent's **shared** and **private**
+    context from the swarm state, fresh for every invocation.
+  - [`tools.py`](src/agents/tools.py) — `search_corpus` (RAG), `web_search` (Tavily) and
+    `request_hypothesis_check`, with a recorder that logs what each agent looked up.
+  - [`checker.py`](src/agents/checker.py) / [`checker_driver.py`](src/agents/checker_driver.py)
+    — the HYPOTHESIS CHECKER agent and the subprocess that runs its analysis scripts over a
+    read-only `DATA` dict (val ground truth + every agent's val predictions).
+  - [`runner.py`](src/agents/runner.py) / [`driver.py`](src/agents/driver.py) — run one
+    `pipeline.py` end-to-end in a subprocess per seed. Missing libraries are auto-installed,
+    and crashes go through the agent's debug loop.
+  - [`pipeline_contract.py`](src/agents/pipeline_contract.py) — the interface every
+    pipeline must implement, and its smoke test.
+  - [`prompts.py`](src/agents/prompts.py) — loads and validates the prompts YAML and renders
+    its `<<placeholders>>`.
+  - [`artifacts.py`](src/agents/artifacts.py) and [`text_utils.py`](src/agents/text_utils.py)
+    — run-dir file I/O, and parsing of LLM output (code fence, notebook, citations).
+- **`src/orchestration/`** — the swarm loop:
+  - [`graph.py`](src/orchestration/graph.py) — the LangGraph `StateGraph` (nodes above), the
+    ledgers, the SQLite checkpointer, and finalization.
+  - [`state.py`](src/orchestration/state.py) — `AgentState`, `Post`, `PendingCheck` and
+    `SwarmState`.
+  - [`observer.py`](src/orchestration/observer.py) — metric tables and the OBSERVER's report.
+  - [`blackboard.py`](src/orchestration/blackboard.py) — formatting and persistence of the
+    blackboard.
+  - [`registry.py`](src/orchestration/registry.py) — the cross-run results registry.
 - **`src/corpus/`** — the literature RAG layer:
-  - [`ingest.py`](src/corpus/ingest.py) — builds the persisted Chroma index from the
-    per-paper JSON summaries.
-  - [`retrieve.py`](src/corpus/retrieve.py) — similarity search over that index, plus
-    `retrieve_diverse`, which hands round-0 agents different papers so they don't all
-    ground themselves in the same top-k. `retrieval_strategy` (config.py / `RETRIEVAL_STRATEGY`)
-    picks how: `shard` (default: one shared candidate pool dealt out round-robin), `mmr`
-    (maximal-marginal-relevance picks from a `retrieval_pool_size` pool, dealt out round-robin),
-    or `cluster` (k-means groups of that pool, one group per agent).
-  - [`pdf_extract.py`](src/corpus/pdf_extract.py) — on-demand full-text PDF extraction
-    and disk caching, keyed by paper id.
-- **`src/data/`** — dataset-agnostic loading, dispatched by `settings.dataset_name`
-  (see Dataset above):
-  - [`spec.py`](src/data/spec.py) — the `DatasetSpec` dataclass every dataset module
-    builds: description text, contract shape doc-strings, smoke-test ids, and loader
-    functions.
-  - [`registry.py`](src/data/registry.py) — `get_dataset_spec(name)`, the name → spec
-    lookup every other module goes through.
-  - [`datasets/landslide4sense.py`](src/data/datasets/landslide4sense.py) — the
-    Landslide4Sense `DatasetSpec`: its description, h5py-based tile loading, and
-    hand-verified smoke-test ids. Template for adding another dataset.
-  - [`dataset.py`](src/data/dataset.py) — the generic entry points (`load_split`,
-    `load_smoke_sample`, `build_data_cache`) that dispatch to the active spec, plus
-    `split_ids_by_ratio`, the seeded train/val/test split logic shared by any
-    id-indexed dataset. Also builds the per-run `.npz` cache so the dataset is read
-    from disk only once per run.
-- **`src/eval/`** — the fixed scoring contract agents cannot override:
-  - [`metrics.py`](src/eval/metrics.py) — pure Dice/IoU implementations.
-  - [`observe.py`](src/eval/observe.py) — the deterministic behavioral comparison of all
-    agents' predictions (precision/recall, tile- and object-level detection, size strata,
-    complementarity, Dice across seeds), formatted as the text tables the peer review
-    is built from.
-  - [`infer.py`](src/eval/infer.py) — runs an agent's `preprocess`/`predict` and scores
-    the result against ground truth.
-- **`src/orchestration/`** — the swarm loop itself:
-  - [`state.py`](src/orchestration/state.py) — `AgentState`/`SwarmState`: particle-style
-    bookkeeping (pipeline, velocity, personal-best, global-best).
-  - [`peer_review.py`](src/orchestration/peer_review.py) — the swarm-wide peer review
-    (call *A*) and the per-agent `Reflect → (GroundReflection) → VelocityUpdate` chain
-    described above, plus the hand-off to `apply_velocity` (call *D*).
-  - [`registry.py`](src/orchestration/registry.py) — the cross-run results registry
-    (see Usage).
-  - [`graph.py`](src/orchestration/graph.py) — the round loop as a LangGraph
-    `StateGraph`: retrieval + initial pipelines at round 0, peer review + pipeline
-    updates in later rounds, personal-/global-best tracking, plateau-based early
-    stopping, and per-agent checkpointing (`state_snapshot.json`, updated as each agent
-    finishes so an interrupted round can resume without rerunning agents already done)
-    for `--resume`. At the end of a run it registers the result.
+  - index building: [`ingest.py`](src/corpus/ingest.py)
+  - similarity search and round-0 diverse seeding: [`retrieve.py`](src/corpus/retrieve.py)
+  - full-text excerpts: [`pdf_extract.py`](src/corpus/pdf_extract.py)
+- **`src/data/`** — dataset-agnostic loading through a `DatasetSpec` (see Dataset above).
+- **`src/eval/`** — the fixed scoring code agents cannot override:
+  - [`metrics.py`](src/eval/metrics.py): Dice/IoU
+  - [`infer.py`](src/eval/infer.py): inference
+  - [`observe.py`](src/eval/observe.py) and [`observe_detail.py`](src/eval/observe_detail.py):
+    the behavioral tables behind the observer
+- [`frontend/`](frontend/) — the run viewer (see "Run viewer" below).
+- [`tests/`](tests/) — offline tests of the graph with every LLM call and pipeline run
+  stubbed, covering:
+  - turn order and rotation
+  - the all-PASS early stop
+  - the check handoff and its cap
+  - mid-conversation resume
+  - the checker's analysis subprocess
+
+  Run them with `uv run pytest tests`.
 
 ## Setup
 
@@ -254,84 +250,151 @@ agent's prompt.
 uv sync
 ```
 
-The swarm uses up to three independently-configured LLMs
-([`src/config.py`](src/config.py)), each free to be a different provider/model:
+The swarm's LLMs are configured independently ([`src/config.py`](src/config.py)), and each
+can be a different provider/model:
 
 | Role | Settings | Used for |
 |---|---|---|
-| Primary | `llm_provider` / `model_name` | the per-agent reflection chain (`Reflect → GroundReflection → VelocityUpdate`) |
-| Peer review / judge | `llm_provider_2` / `model_name_2` | the once-per-round peer-review report on the code-computed metric tables, and the optional fidelity judge that checks each updated `pipeline.py` against its velocity — deliberately cheap/small, since both are narrow read-and-judge tasks |
-| Code | `llm_provider_3` / `model_name_3` | writing the round-0 `pipeline.py`, applying velocities to it, redoing updates the judge flagged, and fixing crashes (`agents/codegen.py`) |
+| Agents | `agents` — a list of groups | the swarm agents: writing and fixing `pipeline.py`, and talking on the blackboard |
+| Observer | `llm_provider_2` / `model_name_2` | the once-per-round comparative report on the metric tables (a cheap model is fine) |
+| Checker | `llm_provider_3` / `model_name_3` | the HYPOTHESIS CHECKER, which writes and runs analysis scripts |
 
-Add the required API key(s) to a `.env` file at the repo root — one per distinct
-provider used above (e.g. `ANTHROPIC_API_KEY`, `GOOGLE_GENAI_API_KEY`); if two roles
-share a provider they share its key. `corpus_json_dir` and `publications_dir` in the
-same file point at the literature corpus's JSON summaries and source PDFs on disk —
-update them to wherever your copy of the corpus lives.
+`agents` lets agents on different models coexist in one swarm, which gives it more diverse
+priors. Each group is `n_agents` agents on one model:
+
+```python
+agents = [
+    {"n_agents": 5, "llm_provider": "google_genai", "model_name": "gemini-3.1-flash-lite", "max_tokens": 300000},
+    {"n_agents": 3, "llm_provider": "openai", "model_name": "gpt-6-luna", "max_tokens": 300000},
+]
+```
+
+- **Numbering.** Agents are numbered in list order: here agent_0–4 run on Gemini and agent_5–7
+  on GPT. The swarm size is the sum of the groups' `n_agents`.
+- **Setting it per run.** `agents` can also be given as JSON in `.env` / the environment
+  (`AGENTS='[...]'`).
+- **What records the model.** Each agent's model is recorded in `run_config.json`, the
+  ledger, the agents' score table and the viewer. A resumed run keeps every agent on the
+  model it started with.
+- **Provider packages.** A provider needs its LangChain package installed (e.g.
+  `uv add langchain-openai` for `openai`). Every model is instantiated at start-up, so a
+  missing package or API key stops the run before anything is paid for.
+
+Add one API key per distinct provider to a `.env` file at the repo root (e.g.
+`GOOGLE_GENAI_API_KEY`, `ANTHROPIC_API_KEY`). Also add `TAVILY_API_KEY` for the agents'
+`web_search` tool; without it the tool is simply not offered (`web_search=false` turns it
+off).
+
+`corpus_json_dir`, `corpus_metadata_csv` and `publications_dir` point at the literature
+corpus on disk. `dataset_dir` points at the Landslide4Sense tiles.
+
+> **Local index vs `retrieval_filter`.** The default filter uses `method_class_name`, which
+> exists only in an index built with the Scopus CSV join. An older local index without it
+> makes every corpus search come back empty. The defaults point at the server
+> (`/mnt/pool/...`). On another machine, set `CORPUS_JSON_DIR`, `CORPUS_METADATA_CSV` and
+> `PUBLICATIONS_DIR` in `.env` to your local copy of the corpus and run once with
+> `--rebuild-index`. `--rebuild-index` drops the old collection first, so only run it where
+> the corpus JSONs exist. Alternatively, `RETRIEVAL_FILTER=null` searches the whole corpus
+> without the filter.
 
 ## Usage
 
 ```bash
-python main.py [--agents N] [--rounds T] [--max-train-tiles N] [--n-seeds N]
-                [--plateau-patience N] [--rebuild-index] [--resume RUN_ID]
+python main.py [--agents N] [--rounds T] [--cycles C] [--max-train-tiles N] [--n-seeds N]
+               [--plateau-patience N] [--rebuild-index] [--resume RUN_ID] [--show-graph]
 ```
 
 | Flag | Description |
 |---|---|
-| `--agents N` | Number of agents in the swarm (default from config: 2). Ignored with `--resume`. |
-| `--rounds T` | Number of rounds to train for (default from config: 2). Required alongside `--resume`, where it is the target round to train up to. |
-| `--max-train-tiles N` | Cap on labeled tiles used for training (a cheap-proxy subset). Ignored with `--resume` — data is reused from the original run. |
-| `--n-seeds N` | Evaluate every pipeline under up to N of the seeds registered in `eval_seeds` (`src/config.py`, default `[42, 43, 44]`); its score is the mean Dice over them. Each seed is a full training run, so cost scales with N. |
-| `--plateau-patience N` | Stop early after this many consecutive rounds with no global-best Dice improvement (default from config: 3). |
-| `--rebuild-index` | Force a rebuild of the RAG literature index even if one already exists. |
-| `--resume RUN_ID` | Keep training an existing run (`<runs_dir>/<RUN_ID>`) instead of starting a new one, reusing its cached dataset split and current swarm state. |
+| `--agents N` | Run N agents, all on the model of the first group in `agents` (default: the groups as configured). Ignored with `--resume`. |
+| `--rounds T` | Number of rounds. With `--resume`, the new target (extends a finished run). |
+| `--cycles C` | Conversation cycles per round (`conversation_cycles`; 0 = no conversation). |
+| `--max-train-tiles N` | Cap on training tiles (a cheap-proxy subset). Ignored with `--resume`. |
+| `--n-seeds N` | Evaluate every pipeline under up to N of `eval_seeds`. The score is the mean Dice. |
+| `--plateau-patience N` | Stop after this many rounds without global-best improvement. |
+| `--rebuild-index` | Rebuild the RAG literature index. |
+| `--resume RUN_ID` | Continue a run from its last checkpoint, which can be mid-conversation. |
+| `--show-graph` | Print the swarm graph as mermaid and exit. |
 
-Each run writes to `<runs_dir>/<run_id>/` (`runs_dir` in
-[`src/config.py`](src/config.py), default `runs_landslide4sense/`): per-round
-`peer_review.md` / `peer_review_tables.md`, per-round, per-agent
-`pipeline.py`/`reflection.md`/`velocity.md`/`velocity_reasoning.md`/`fidelity.md`/`driver_stdout.json` and per-seed validation
-predictions, an append-only `ledger.jsonl` of every round's scores (per seed, with the
-size of each change, the fidelity verdict and the behavior metrics), a `state_snapshot.json` checkpoint (used
-by `--resume`), `g_best_pipeline.py`, and a final `summary.json`.
+Main conversation/tool settings in [`src/config.py`](src/config.py), each also settable as an
+environment variable:
 
-### Prompt variants
+| Setting | Controls |
+|---|---|
+| `conversation_cycles` | cycles per round |
+| `max_checks_per_round`, `checker_max_runs`, `checker_timeout_s`, `checker_output_char_cap` | the checker |
+| `agent_max_tool_calls` | tool calls per agent invocation |
+| `rag_tool_k`, `rag_tool_char_cap` | corpus tool |
+| `web_search`, `web_search_max_results` | Tavily |
+| `notebook_char_cap` | the agent's notebook |
 
-Every prompt lives in one YAML file, and `prompts_file` in [`src/config.py`](src/config.py)
-says which one a run reads: a name resolved under `src/` (default `prompts.yaml`), or a path.
-Keep one file per variant and select it per run without touching code:
+Each run writes to `<runs_dir>/<run_id>/`:
+
+- `run_config.json`, `prompts_used.yaml`, `_data_cache.npz`
+- `checkpoints.sqlite` — the LangGraph checkpoint after every node, used by `--resume`
+- `ledger.jsonl` — one row per agent per round:
+  - Dice per seed, IoU and behavior metrics
+  - debug iterations, cited papers and changed `HPARAMS`
+  - what the agent searched while building
+- `conversation_ledger.jsonl` — one row per agent per round: posts, passes, check requests,
+  tool use
+- `round_<t>/`:
+  - `observer.md`, `observer_tables.md`
+  - `blackboard.{jsonl,md}`
+  - `checker/` (inputs, scripts, transcripts)
+- `round_<t>/agent_<i>/`:
+  - `pipeline.py`, `notebook.md`, `seed_papers.md` (round 0)
+  - `build_transcript.md`, `talk_transcript.md` (tool calls and answers)
+  - `driver_stdout.json`, `val_preds_seed<S>.npz`
+- `g_best_pipeline.py`, `summary.json`
+
+Every finished run is also registered in `<runs_dir>/registry.jsonl` and a flattened
+`registry.csv`: one row per run. Each row holds:
+- configuration: models, agents, rounds, cycles, seeds, retrieval settings, git commit
+- outcome: global-best Dice, best agent and round, stop reason
+- per-round curves
+- conversation totals: posts, checks, tool calls
+
+`orchestration.registry.load_registry(runs_dir)` returns the registry as a DataFrame.
+
+### Run viewer
 
 ```bash
-PROMPTS_FILE=prompts_velocity_update_cot.yaml python main.py --agents 5 --rounds 10
+uv run python frontend/server.py [RUNS_DIR ...] [--port 8765]
 ```
 
-(or set `PROMPTS_FILE` in `.env`). Besides the default, `prompts_diversity_enhancement.yaml` pushes agents to
-keep their own approach, and `prompts_divers_enhanc_onVeloc.yaml` is the same with a looser velocity step: one
-coherent change per round (a structural mechanism with its companion hyperparameters, or up to two related
-tweaks), a preference for adopting literature candidates over further tuning (with the paper id kept in
-`final_velocity`), no ban on borrowing from the best pipelines, and a fidelity judge that accepts the companion
-hyperparameters. The file is checked when the program starts, before any LLM call
-or training is paid for. Only two things stop a run, each with the file name and the problem:
-a file that does not exist, and a prompt that an enabled feature needs but the file lacks
-(there is nothing to send). Placeholders never stop a run: a prompt may leave them out (e.g.
-drop the trajectory from the velocity prompt) and they are just not shown, while one the code
-does not supply (a typo, or one from another version of the prompts) gets a warning and is
-left as written in the text.
-The fidelity and enrichment prompts are only required when those features are switched on.
-Each run stores the file it used as `<run>/prompts_used.yaml`, and the registry records its
-name and a short hash (`prompts_file`, `prompts_sha`), so results can be traced to the exact
-prompt text; `--resume` warns if the file changed since the run started.
+A local, read-only web page (standard-library server on `127.0.0.1`) for browsing runs.
+Without arguments it shows `runs_dir` and every `runs*/` folder at the repo root; old PSO runs
+are listed too, as generic files. Per run it shows:
+- **Overview** — Dice per agent and round, and conversation activity.
+- **Rounds** — for every round:
+  - **Agents** — each agent's pipeline, notebook, and full build conversation: system prompt,
+    shared + private input, every tool call and result, and the answer. Also its debug fixes,
+    run log (tracebacks per attempt) and blackboard turns.
+  - **Observer** — the observer's report, tables and prompt.
+  - **Blackboard** — the blackboard as a chat.
+  - **Hypothesis checks** — every check with its analysis scripts.
 
-### Ablation: no literature, single agent
+Tick *auto-refresh* to follow a run while it is going. Transcripts split into messages on the
+`===== [kind] =====` lines that `agents/swarm_agent.py::transcript` writes.
 
-`use_rag=false` (config / `USE_RAG`) switches corpus retrieval off. The round-0 prompt becomes
-`pipeline.initial_user_no_rag`, which only the prompt files meant for this mode define; with
-`use_rag=false` a file lacking it is rejected at startup, and the retrieval and enrichment prompts
-are no longer required. [`src/prompts_singleagent_noRag.yaml`](src/prompts_singleagent_noRag.yaml)
-is that variant for one agent: it also drops every mention of peers, a swarm and a global best, so
-the agent only sees its own behavior report and its own best pipeline. A baseline run is
-`USE_RAG=false PROMPTS_FILE=prompts_singleagent_noRag.yaml python main.py --agents 1 --rounds 10`.
-`use_rag` is recorded in the registry next to `retrieval_strategy`, `retrieval_k`,
-`retrieval_pool_size`, `mmr_lambda` and `retrieval_filter`.
+### Prompts
+
+Every prompt lives in one YAML file, [`src/prompts.yaml`](src/prompts.yaml) by default
+(`prompts_file` / `PROMPTS_FILE` selects another):
+
+| Key | Prompt |
+|---|---|
+| `agent.system` | the system prompt of every swarm agent |
+| `agent.build_initial_user[_no_rag]`, `agent.build_user`, `agent.fix_user` | writing and fixing pipelines |
+| `conversation.turn_user` | a blackboard turn |
+| `observer.{system,user}` | the OBSERVER |
+| `checker.{system,user}` | the HYPOTHESIS CHECKER |
+
+The file is validated at start-up. A missing prompt stops the run. A placeholder the code
+does not supply only produces a warning. Each run keeps a copy of the file (`prompts_used.yaml`)
+and the registry stores its hash. The PSO-era prompt variants are kept in
+[`obsolete/prompts/`](obsolete/prompts/); they do not work with this code.
 
 ### Metadata filter on retrieval
 
@@ -341,8 +404,8 @@ filename stem == the CSV's `EID`, to the Scopus-export CSV at `corpus_metadata_c
 `source_title` and `document_type` to the metadata already stored (`paper_id`,
 `reproducibility_status`, `n_methods`, `n_datasets`). Unmatched or blank values become `"UNKNOWN"`
 (text) or `0` (numbers). `retrieval_filter` (config / `RETRIEVAL_FILTER` as JSON) is a Chroma
-`where` dict applied to every corpus retrieval — round 0 under all three strategies and the enriched
-reflection; `None` searches the whole corpus. E.g. `{"method_class_name": "CNN-based Semantic
+`where` dict applied to every corpus retrieval — round-0 seeding under all three strategies and every
+`search_corpus` tool call; `None` searches the whole corpus. E.g. `{"method_class_name": "CNN-based Semantic
 Segmentation"}` or `{"$and": [{"year": {"$gte": 2022}}, {"reproducibility_status": "REPRODUCIBLE"}]}`.
 Changing the CSV or its path needs `--rebuild-index` (which now drops the old collection first
 instead of appending duplicates); changing only the filter does not. A filter matching fewer than
@@ -359,10 +422,10 @@ gives each agent the top papers of its group. The prompts do not change between 
 
 ### Observation detail
 
-`observation_detail` (config / `OBSERVATION_DETAIL`) sets what the peer-review step shows about each
+`observation_detail` (config / `OBSERVATION_DETAIL`) sets what the OBSERVER is shown about each
 round. `basic` (default) is the aggregate tables of [`src/eval/observe.py`](src/eval/observe.py).
 `detailed` appends the tile-level section of [`src/eval/observe_detail.py`](src/eval/observe_detail.py),
-which both the peer-review LLM and every agent's reflection then see:
+which both the OBSERVER and every agent (through the shared tables) then see:
 
 - **Stratified results**: tile Dice on landslide tiles, and the false-alarm share on landslide-free
   tiles, by landslide size, number of landslide objects, and terciles of mean slope / elevation /
@@ -378,58 +441,7 @@ which both the peer-review LLM and every agent's reflection then see:
   what makes tiles hard rather than tuning to named validation tiles; it also shows whether the swarm's
   Dice on the hard groups is improving round by round.
 
-The extra text is about 2k tokens with 10 agents, added to the peer-review prompt and to each agent's reflection prompt; computing it takes about 10 s per round (the first review of a run also back-fills the per-tile cache from the saved predictions).
-
-### Reflection read by the velocity step
-
-When an agent's reflection is enriched with retrieved literature, the enrichment rewrites it around the papers and
-drops most of the behavioral numbers, and the velocity step sees nothing of the peer-review tables except what
-the reflection carries. `velocity_reflection` (config / `VELOCITY_REFLECTION`) sets what the velocity step reads:
-`original+enriched` (default) the original reflection followed by the enriched one, `enriched` only the enriched
-one (the earlier behavior). `reflection.md` stays the enriched text; the original is saved next to it as
-`reflection_original.md` for the rounds where the enrichment ran. Agents without enrichment are unaffected.
-
-### Results notebooks
-
-`runs_pipeline_optimization/` holds finished runs and their analysis notebooks. The single-agent
-notebooks read every run folder next to them and plot the runs on shared axes with the mean across
-runs; they also include the behavior metrics recomputed over all saved evaluation seeds (cached as
-`metrics_allseeds.csv` in each run folder, needs the validation labels once) and, for RAG-seeded
-runs, a section on which papers seeded and enriched each run.
-
-**Structured answers, independent of the prompt.** Two calls produce an answer the code has to
-read one part of, so the code fixes their shape instead of relying on prompt wording
-([`src/agents/structured.py`](src/agents/structured.py)): the velocity update is always
-requested as JSON with the fields `reasoning` and `final_velocity`, and the fidelity judge
-with `violations` and `verdict` (`FAITHFUL` / `NOT_FAITHFUL`). `final_velocity` is the velocity: the
-directive the code LLM applies, the fidelity judge checks, and the trajectory records. The
-`reasoning` is saved in `velocity_reasoning.md` and given to the code LLM as context (in the
-update call and when it redoes a flagged one, via `<<velocity_reasoning>>` in those prompts), but
-it is deliberately hidden from the fidelity judge, which must judge the directive on its own. The schema is sent with the request through the provider's native
-structured output; if that is unavailable, the code asks for the same JSON in plain text, and
-as a last resort uses the raw reply as the velocity (and honors a trailing `VERDICT:` line from
-the judge). So any prompt file works, even one that says nothing about JSON; the prompts only
-have to explain what belongs in each field.
-
-[`src/prompts_velocity_cot_multichanges.yaml`](src/prompts_velocity_cot_multichanges.yaml) is the
-chain-of-thought variant below with the one-change limit taken out of the velocity, apply and
-reflect prompts: the velocity may list several changes (structural and parametric, in any mix) when
-they serve the same weakness or need each other, and the update applies all of them. Nothing in
-the code assumes a count: every change shows up in the ledger (`hparams_changed` lists every
-`HPARAMS` value that moved, `changed_lines` the size of the edit). Its judge prompts are unchanged
-and still describe one change, so run it with `fidelity_check = False`.
-
-[`src/prompts_velocity_update_cot.yaml`](src/prompts_velocity_update_cot.yaml) is the default
-prompts with a **chain-of-thought velocity update**: the model is told to put numbered reasoning
-(last move, diagnosis, 2–4 candidate changes, elimination, decision) in `reasoning` and only the
-chosen directive in `final_velocity`.
-
-Every finished run is also registered in `<runs_dir>/registry.jsonl` (and a flattened
-`registry.csv`): one row per run with its configuration (models, agents, rounds, seeds,
-enrichment settings, git commit), outcome (global-best Dice mean/std/per-seed, best agent
-and round, stop reason) and per-round curves, so runs can be compared without opening
-their folders — `orchestration.registry.load_registry(runs_dir)` returns it as a
-DataFrame.
+The extra text is about 2k tokens with 10 agents, added to the observer prompt and to every agent's shared context; computing it takes about 10 s per round (the first observation of a run also back-fills the per-tile cache from the saved predictions).
 
 ## License
 

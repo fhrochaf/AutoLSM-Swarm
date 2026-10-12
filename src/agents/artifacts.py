@@ -1,6 +1,7 @@
-"""Per-run/round/agent storage: runs/<run_id>/round_<t>/agent_<i>/{pipeline.py,
-reflection.md, velocity.md, val_preds_seed<S>.npz, driver_stdout.json}, plus
-round_<t>/peer_review.md (+ peer_review_tables.md) shared by the whole swarm."""
+"""Per-run/round/agent storage: <runs_dir>/<run_id>/round_<t>/agent_<i>/{pipeline.py,
+notebook.md, build_transcript.md, talk_transcript.md, val_preds_seed<S>.npz,
+driver_stdout.json}, plus the round's shared files round_<t>/{observer.md,
+observer_tables.md, blackboard.{jsonl,md}, checker/}."""
 from __future__ import annotations
 
 from pathlib import Path

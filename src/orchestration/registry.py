@@ -24,11 +24,21 @@ JSONL_NAME = "registry.jsonl"
 CSV_NAME = "registry.csv"
 
 
+def llms(settings: Settings) -> dict:
+    return {
+        "agents": [{"n_agents": g.n_agents, "model": g.label} for g in settings.agents],
+        "observer": f"{settings.llm_provider_2}/{settings.model_name_2}",
+        "checker": f"{settings.llm_provider_3}/{settings.model_name_3}",
+    }
+
+
 def build_record(
     settings: Settings,
     state: SwarmState,
     stop_reason: str,
+    rounds_run: int,
     ledger: list[dict],
+    conversation: list[dict],
     git: dict | None,
 ) -> dict:
     """Everything worth comparing runs by: configuration, outcome, and the trajectory."""
@@ -45,6 +55,11 @@ def build_record(
             swarm_mean.append(None)
         curve.append(round(best_so_far, 6) if best_so_far > float("-inf") else None)
 
+    posts_per_round = [
+        sum(e.get("posts", 0) for e in conversation if e["round"] == t)
+        for t in sorted({e["round"] for e in conversation})
+    ]
+
     return {
         "run_id": state.run_id,
         "registered_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -52,36 +67,25 @@ def build_record(
         "dataset": settings.dataset_name,
         "prompts_file": PROMPTS_PATH.name,
         "prompts_sha": PROMPTS_SHA,  # which exact prompt text produced this result
-        "llms": {
-            "primary": f"{settings.llm_provider}/{settings.model_name}",
-            "peer_review": f"{settings.llm_provider_2}/{settings.model_name_2}",
-            "code": f"{settings.llm_provider_3}/{settings.model_name_3}",
-        },
+        "llms": llms(settings),
         "n_agents": len(state.agents),
-        "n_rounds_requested": state.n_rounds,
-        "rounds_run": state.round,
+        "n_rounds_requested": settings.n_rounds,
+        "rounds_run": rounds_run,
         "stop_reason": stop_reason,
         "eval_seeds": settings.active_seeds(),
         "p_best_epsilon": settings.p_best_epsilon,
         "plateau_patience": settings.plateau_patience,
-        "velocity_history_len": settings.velocity_history_len,
         "use_rag": settings.use_rag,
+        "web_search": settings.web_search,
         "observation_detail": settings.observation_detail,
-        "velocity_reflection": settings.velocity_reflection,
         "retrieval_strategy": settings.retrieval_strategy,
         "retrieval_k": settings.retrieval_k,
         "retrieval_pool_size": settings.retrieval_pool_size,
         "mmr_lambda": settings.mmr_lambda,
         "retrieval_filter": settings.retrieval_filter,
-        "enriched_reflection_all": settings.enriched_reflection_all,
-        "random_enriched_reflection": settings.random_enriched_reflection,
-        "fidelity_check": settings.fidelity_check,
-        "max_fidelity_iters": settings.max_fidelity_iters,
-        "run_unfaithful_pipeline": settings.run_unfaithful_pipeline,
-        "fidelity_web_search": settings.fidelity_web_search,
-        # agent-rounds the judge flagged at least once / that stayed flagged after the last revision
-        "n_fidelity_flagged": sum(1 for e in ledger if (e.get("fidelity_revisions") or 0) > 0 or e.get("fidelity_faithful") is False),
-        "n_fidelity_unresolved": sum(1 for e in ledger if e.get("fidelity_faithful") is False),
+        "conversation_cycles": settings.conversation_cycles,
+        "max_checks_per_round": settings.max_checks_per_round,
+        "agent_max_tool_calls": settings.agent_max_tool_calls,
         "max_train_tiles": settings.max_train_tiles,
         "g_best_score": state.g_best_score if state.g_best_score > float("-inf") else None,
         "g_best_dice_per_seed": best_row.get("dice_per_seed") if best_row else None,
@@ -92,6 +96,13 @@ def build_record(
         "n_failed_runs": len(ledger) - len(ok),
         "g_best_curve": curve,  # best mean Dice so far, per round
         "swarm_mean_curve": swarm_mean,  # mean Dice of the agents that ran, per round
+        "posts_per_round": posts_per_round,
+        "n_checks": sum(e.get("checks_requested", 0) for e in conversation),
+        "n_passes": sum(e.get("passes", 0) for e in conversation),
+        "tool_calls": {
+            "build": sum(e.get("build_tool_calls", 0) for e in ledger),
+            "conversation": sum(e.get("tool_calls", 0) for e in conversation),
+        },
     }
 
 

@@ -26,7 +26,7 @@ class DatasetSpec:
     """Everything dataset-specific that the rest of the codebase needs.
 
     description: free-text prose handed to the LLM (pipeline prompts,
-        the reflection prompts, the retrieval query) -- shape, channels, temporal structure,
+        the observer, the retrieval query) -- shape, channels, temporal structure,
         label semantics, whatever an agent needs to know about the fixed input it
         will receive.
     input_shape_doc / label_shape_doc: short shape annotations (e.g. "(N,128,128,14)",

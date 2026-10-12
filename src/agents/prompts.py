@@ -4,15 +4,14 @@ Which file is read is `settings.prompts_file` (config.py, or the PROMPTS_FILE en
 variable / .env): a name resolved under src/ (default `prompts.yaml`), or a path. Keep one
 YAML per prompt variant you want to compare; each run stores a copy of the one it used.
 
-`render("velocity.system")` / `render("reflect.user", agent_idx=3, ...)` return the prompt
+`render("observer.system")` / `render("checker.user", requester=3, ...)` return the prompt
 text with its <<placeholders>> filled in. The module also computes the few dataset-derived
 strings the prompts embed, so switching `settings.dataset_name` re-points every prompt.
 
 The file is checked when this module is imported, i.e. before any LLM call or training run
-is paid for. The only thing that stops a run is a prompt the enabled features need but the
-file does not have at all (there is no text to send). Everything about placeholders is
-forgiving: a prompt may leave placeholders out (e.g. drop the trajectory from the velocity
-prompt) -- they are just not shown; a placeholder the code does not supply (a typo, or one
+is paid for. The only thing that stops a run is a prompt the run needs but the file does not
+have at all (there is no text to send). Everything about placeholders is forgiving: a prompt
+may leave placeholders out -- they are just not shown; a placeholder the code does not supply (a typo, or one
 from another version of the prompts) is reported as a warning and left as written in the
 text, and render() never raises because of one.
 """
@@ -35,34 +34,19 @@ _PLACEHOLDER = re.compile(r"<<(\w+)>>")
 # Every prompt the code renders, with the variables it supplies for that prompt.
 PROMPT_VARIABLES: dict[str, set[str]] = {
     "retrieval_query": {"dataset_description"},
-    "pipeline.system": {"required_funcs_doc", "default_seed"},
-    "pipeline.initial_user": {"dataset_description", "retrieved_papers"},
-    "pipeline.initial_user_no_rag": {"dataset_description"},
-    "pipeline.apply_velocity_user": {"dataset_description", "current_code", "velocity", "velocity_reasoning"},
-    "pipeline.fix_user": {"previous_code", "error_message"},
-    "peer_review.system": set(),
-    "peer_review.user": {"dataset_description", "tables"},
-    "reflect.system": set(),
-    "reflect.grounding_suffix": set(),
-    "reflect.user": {"dataset_description", "agent_idx", "pipeline_code", "peer_review"},
-    "reflect.enrich_system": set(),
-    "reflect.enrich_user": {"reflection", "grounding"},
-    "velocity.system": set(),
-    "velocity.user": {
-        "prev_velocity", "trajectory", "current_dice", "best_this_round", "reflection",
-        "pipeline_code", "p_best_score", "p_best_block", "g_best_score", "g_best_block",
-    },
-    "fidelity.system": {"required_funcs_doc", "dataset_description"},
-    "fidelity.user": {"velocity", "diff", "new_code"},
-    "fidelity.revise_user": {
-        "dataset_description", "velocity", "velocity_reasoning", "previous_code", "flawed_code", "feedback",
-        "search_hint",
-    },
+    "agent.system": {"agent_id", "n_agents", "dataset_description", "required_funcs_doc", "default_seed", "hardware"},
+    "agent.build_initial_user": {"seed_papers"},
+    "agent.build_initial_user_no_rag": set(),
+    "agent.build_user": set(),
+    "agent.fix_user": {"previous_code", "error_message"},
+    "conversation.turn_user": {"cycle", "n_cycles", "checks_left"},
+    "observer.system": set(),
+    "observer.user": {"dataset_description", "tables"},
+    "checker.system": {"data_schema", "max_runs"},
+    "checker.user": {"requester", "question", "scores"},
 }
-_FIDELITY_KEYS = {k for k in PROMPT_VARIABLES if k.startswith("fidelity.")}
-_ENRICH_KEYS = {"reflect.grounding_suffix", "reflect.enrich_system", "reflect.enrich_user"}
-_RAG_KEYS = {"retrieval_query", "pipeline.initial_user"}
-_NO_RAG_KEYS = {"pipeline.initial_user_no_rag"}
+_RAG_KEYS = {"retrieval_query", "agent.build_initial_user"}
+_NO_RAG_KEYS = {"agent.build_initial_user_no_rag"}
 
 
 def resolve_prompts_path(name: str) -> Path:
@@ -115,14 +99,10 @@ def placeholders(key: str) -> set[str]:
 
 
 def required_keys() -> set[str]:
-    """Prompts the current config can actually reach: optional features only when enabled."""
-    keys = set(PROMPT_VARIABLES) - _FIDELITY_KEYS - _ENRICH_KEYS - _NO_RAG_KEYS
-    if settings.fidelity_check:
-        keys |= _FIDELITY_KEYS
+    """Prompts the current config can actually reach (round 0 differs with and without RAG)."""
+    keys = set(PROMPT_VARIABLES) - _NO_RAG_KEYS
     if not settings.use_rag:
         keys = (keys - _RAG_KEYS) | _NO_RAG_KEYS
-    elif settings.enriched_reflection_all or settings.random_enriched_reflection > 0 or settings.enriched_leader:
-        keys |= _ENRICH_KEYS
     return keys
 
 
@@ -149,9 +129,7 @@ def validate_prompts() -> None:
             )
     if missing_keys:
         raise ValueError(
-            f"{PROMPTS_PATH} lacks prompt(s) the enabled features need: {missing_keys}. Add them, or switch the "
-            "feature off in config.py (fidelity_check; enriched_reflection_all / random_enriched_reflection / "
-            "enriched_leader)."
+            f"{PROMPTS_PATH} lacks prompt(s) the run needs: {missing_keys}."
         )
 
 
@@ -191,6 +169,50 @@ REQUIRED_FUNCS_DOC = build_required_funcs_doc(_DATASET_SPEC)
 # target given this kind of dataset" rather than a predetermined method family.
 RETRIEVAL_QUERY = render("retrieval_query", dataset_description=DATASET_DESCRIPTION) if settings.use_rag else ""
 
-PIPELINE_SYSTEM_PROMPT = render(
-    "pipeline.system", required_funcs_doc=REQUIRED_FUNCS_DOC, default_seed=settings.seed
-)
+
+_HARDWARE: str | None = None
+
+
+def hardware_description() -> str:
+    """What the pipelines will run on (the driver subprocess runs on this same machine): CUDA GPUs
+    with their memory if PyTorch sees any, otherwise CPU only; plus CPU cores and RAM."""
+    global _HARDWARE
+    if _HARDWARE is None:
+        import os
+
+        parts = []
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                gpus = [
+                    f"{torch.cuda.get_device_name(i)} ({torch.cuda.get_device_properties(i).total_memory / 2**30:.0f} GB)"
+                    for i in range(torch.cuda.device_count())
+                ]
+                parts.append(f"CUDA GPU available: {', '.join(gpus)}")
+            else:
+                parts.append("no CUDA GPU (CPU only)")
+        except ImportError:
+            parts.append("no CUDA GPU detected (PyTorch not installed)")
+        parts.append(f"{os.cpu_count()} CPU cores")
+        try:
+            import psutil
+
+            parts.append(f"{psutil.virtual_memory().total / 2**30:.0f} GB RAM")
+        except ImportError:
+            pass
+        _HARDWARE = "; ".join(parts) + "."
+    return _HARDWARE
+
+
+def agent_system_prompt(agent_idx: int, n_agents: int) -> str:
+    """The system prompt of swarm agent `agent_idx` (writes, fixes and talks with it)."""
+    return render(
+        "agent.system",
+        agent_id=agent_idx,
+        n_agents=n_agents,
+        dataset_description=DATASET_DESCRIPTION,
+        required_funcs_doc=REQUIRED_FUNCS_DOC,
+        default_seed=settings.seed,
+        hardware=hardware_description(),
+    )

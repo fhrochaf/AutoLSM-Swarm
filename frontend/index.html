@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoLSM-Swarm Runs</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css" media="(prefers-color-scheme: light)">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #667085; --border: #e3e6eb;
+  --accent: #3b5bdb; --accent-soft: #e8edff; --ok: #2b8a3e; --bad: #c92a2a; --warn: #b7791f;
+  --code-bg: #f3f4f6; --sys: #f1f3f5; --tool: #fff8e6; --answer: #eaf7ee; --input: #eef3ff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151b; --panel: #1a1f27; --text: #e4e7ec; --muted: #98a2b3; --border: #2c333e;
+    --accent: #7b93ff; --accent-soft: #232b45; --ok: #69db7c; --bad: #ff8787; --warn: #f6c453;
+    --code-bg: #141920; --sys: #20262f; --tool: #2a2618; --answer: #17291d; --input: #1c2438;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+header h1 { font-size: 16px; margin: 0; }
+header .spacer { flex: 1; }
+header label { color: var(--muted); font-size: 13px; display: flex; gap: 6px; align-items: center; }
+button { font: inherit; cursor: pointer; border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 6px; padding: 4px 10px; }
+button:hover { border-color: var(--accent); }
+button.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.layout { display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 49px); }
+aside { border-right: 1px solid var(--border); background: var(--panel); overflow-y: auto; max-height: calc(100vh - 49px); position: sticky; top: 49px; }
+.run-item { padding: 10px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.run-item:hover { background: var(--accent-soft); }
+.run-item.sel { background: var(--accent-soft); border-left: 3px solid var(--accent); }
+.run-item .id { font-weight: 600; font-family: ui-monospace, monospace; font-size: 13px; }
+.run-item .meta { color: var(--muted); font-size: 12px; }
+.dirlabel { padding: 8px 14px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); background: var(--bg); border-bottom: 1px solid var(--border); word-break: break-all; }
+main { padding: 16px; min-width: 0; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 16px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+.card h2 { font-size: 15px; margin: 0 0 10px; }
+.card h3 { font-size: 14px; margin: 0; }
+.muted { color: var(--muted); }
+.badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+.badge.ok { color: var(--ok); border-color: var(--ok); }
+.badge.bad { color: var(--bad); border-color: var(--bad); }
+.badge.live { color: var(--warn); border-color: var(--warn); }
+table { border-collapse: collapse; font-size: 13px; }
+th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+th { background: var(--bg); }
+.tablewrap { overflow-x: auto; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; font-size: 13px; }
+.kv div:nth-child(odd) { color: var(--muted); }
+pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; overflow: auto; max-height: 70vh; font-size: 12.5px; margin: 6px 0; }
+code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+pre code.hljs { background: transparent; padding: 0; }
+.md { overflow-wrap: anywhere; }
+.md table { margin: 8px 0; }
+.md pre { max-height: 50vh; }
+.agent-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.subtabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+.subtabs button { font-size: 12px; padding: 2px 8px; }
+details.msg { border: 1px solid var(--border); border-radius: 8px; margin: 6px 0; background: var(--panel); }
+details.msg > summary { padding: 6px 10px; cursor: pointer; font-size: 12px; font-weight: 600; letter-spacing: .02em; }
+details.msg > .body { padding: 0 12px 10px; }
+details.msg.system { background: var(--sys); }
+details.msg.input { background: var(--input); }
+details.msg.tool { background: var(--tool); }
+details.msg.answer { background: var(--answer); }
+.post { border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; margin: 8px 0; border-left: 4px solid var(--c, var(--accent)); background: var(--panel); }
+.post .who { font-weight: 600; font-size: 13px; color: var(--c, var(--accent)); }
+.post.check_request { background: var(--tool); }
+.post.check_result { background: var(--answer); border-left-color: var(--ok); }
+.post.check_result .who { color: var(--ok); }
+.empty { color: var(--muted); font-style: italic; }
+.cell-best { font-weight: 700; color: var(--ok); }
+@media (max-width: 760px) {
+  .layout { grid-template-columns: 1fr; }
+  aside { position: static; max-height: 40vh; }
+  main { padding: 12px 16px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>AutoLSM-Swarm runs</h1>
+  <span class="spacer"></span>
+  <label><input type="checkbox" id="auto"> auto-refresh (10 s)</label>
+  <button id="refresh">Refresh</button>
+</header>
+<div class="layout">
+  <aside id="runs"></aside>
+  <main id="main"><p class="empty">Pick a run on the left.</p></main>
+</div>
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const AGENT_COLORS = ["#3b5bdb", "#d6336c", "#2b8a3e", "#e8590c", "#7048e8", "#0c8599", "#a61e4d", "#5c940d"];
+const agentColor = a => { const m = /agent_(\d+)/.exec(a || ""); return m ? AGENT_COLORS[+m[1] % AGENT_COLORS.length] : "var(--accent)"; };
+// "<provider>/<model>" of an agent, from run_config.json (one entry per agent) or the ledger.
+const modelOf = a => {
+  const c = S.run && S.run.run_config && S.run.run_config.agents && S.run.run_config.agents[a];
+  if (c) return `${c.llm_provider}/${c.model_name}`;
+  const e = S.run && S.run.ledger.find(x => String(x.agent_idx) === String(a) && x.model);
+  return e ? e.model : "";
+};
+const fmt = v => typeof v === "number" ? (Number.isFinite(v) ? v.toFixed(4) : "–") : (v ?? "–");
+
+if (window.marked) {
+  marked.use({ gfm: true, breaks: false, renderer: { html(t) { return esc(typeof t === "string" ? t : (t.text || t.raw || "")); } } });
+}
+function md(text) {
+  if (!window.marked) return `<pre>${esc(text)}</pre>`;
+  return `<div class="md">${marked.parse(String(text ?? ""))}</div>`;
+}
+function highlight(root) {
+  if (!window.hljs) return;
+  root.querySelectorAll("pre code").forEach(el => { if (!el.dataset.hl) { el.dataset.hl = 1; hljs.highlightElement(el); } });
+}
+function codeBlock(text, lang = "python") { return `<pre><code class="language-${lang}">${esc(text)}</code></pre>`; }
+
+const S = { runs: [], sel: null, run: null, tab: "overview", sub: {}, files: {} };
+
+async function getJSON(url) { const r = await fetch(url); if (!r.ok) throw new Error(await r.text()); return r.json(); }
+async function getFile(path) {
+  if (S.files[path] !== undefined) return S.files[path];
+  const r = await fetch(`/api/file?dir=${S.sel.dir}&id=${encodeURIComponent(S.sel.id)}&path=${encodeURIComponent(path)}`);
+  S.files[path] = r.ok ? await r.text() : null;
+  return S.files[path];
+}
+
+// ---------------------------------------------------------------- runs list
+async function loadRuns() {
+  const data = await getJSON("/api/runs");
+  S.runs = data.runs;
+  const byDir = {};
+  data.runs.forEach(r => (byDir[r.dir] ??= []).push(r));
+  $("#runs").innerHTML = data.runs_dirs.map((d, i) => `
+    <div class="dirlabel">${esc(d)}</div>
+    ${(byDir[i] || []).map(r => `
+      <div class="run-item ${S.sel && S.sel.dir === r.dir && S.sel.id === r.run_id ? "sel" : ""}" data-dir="${r.dir}" data-id="${esc(r.run_id)}">
+        <div class="id">${esc(r.run_id)}</div>
+        <div class="meta">${r.n_agents ?? "?"} agents · ${r.rounds_seen}/${r.n_rounds ?? "?"} rounds · best ${fmt(r.best_dice)}</div>
+        <div class="meta">${r.finished ? '<span class="badge ok">finished</span>' : '<span class="badge live">running / stopped</span>'}
+          ${r.kind === "legacy" ? '<span class="badge">legacy (PSO)</span>' : ""}</div>
+      </div>`).join("") || '<div class="run-item empty">no runs</div>'}`).join("");
+  document.querySelectorAll(".run-item[data-id]").forEach(el => el.onclick = () => selectRun(+el.dataset.dir, el.dataset.id));
+}
+
+async function selectRun(dir, id) {
+  if (!S.sel || S.sel.dir !== dir || S.sel.id !== id) { S.tab = "overview"; S.sub = {}; }
+  S.sel = { dir, id };
+  try { localStorage.setItem("autolsm-sel", JSON.stringify(S.sel)); } catch (e) {}
+  await loadRun();
+  loadRuns();
+}
+
+async function loadRun() {
+  S.files = {};
+  S.run = await getJSON(`/api/run?dir=${S.sel.dir}&id=${encodeURIComponent(S.sel.id)}`);
+  render();
+}
+
+// ---------------------------------------------------------------- main view
+function render() {
+  const run = S.run;
+  const tabs = [["overview", "Overview"], ...run.rounds.map(r => [`r${r.round}`, `Round ${r.round}`]), ["files", "Run files"]];
+  $("#main").innerHTML = `
+    <h2 style="margin:0">${esc(run.run_id)}</h2>
+    <div class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${S.tab === k ? "active" : ""}">${l}</button>`).join("")}</div>
+    <div id="view"></div>`;
+  document.querySelectorAll("[data-tab]").forEach(b => b.onclick = () => { S.tab = b.dataset.tab; render(); });
+  const view = $("#view");
+  if (S.tab === "overview") renderOverview(view);
+  else if (S.tab === "files") renderFileList(view, run.top_files, "Run-level files");
+  else renderRound(view, run.rounds.find(r => `r${r.round}` === S.tab));
+  highlight(view);
+}
+
+function renderOverview(view) {
+  const run = S.run, cfg = run.run_config || {}, sum = run.summary || {};
+  const ledger = run.ledger;
+  const agents = [...new Set(ledger.map(e => e.agent_idx))].sort((a, b) => a - b);
+  const rounds = [...new Set(ledger.map(e => e.round))].sort((a, b) => a - b);
+  const best = Math.max(...ledger.map(e => typeof e.dice === "number" ? e.dice : -Infinity));
+  const cell = (r, a) => {
+    const e = ledger.find(x => x.round === r && x.agent_idx === a);
+    if (!e) return "<td></td>";
+    if (!e.success) return `<td><span class="badge bad">failed</span></td>`;
+    const std = typeof e.dice_std === "number" ? ` <span class="muted">±${e.dice_std.toFixed(3)}</span>` : "";
+    return `<td class="${e.dice === best ? "cell-best" : ""}">${fmt(e.dice)}${std}<br><span class="muted">${e.debug_iters ?? 0} fix · ${e.build_tool_calls ?? "–"} tools</span></td>`;
+  };
+  const conv = run.conversation;
+  view.innerHTML = `
+    <div class="card"><h2>Run</h2><div class="kv">
+      <div>status</div><div>${run.summary ? `finished (${esc(sum.stop_reason)})` : "running or stopped"}</div>
+      <div>agents × rounds</div><div>${cfg.n_agents ?? "?"} × ${cfg.n_rounds ?? "?"}</div>
+      <div>global best</div><div>${fmt(sum.g_best_score ?? (Number.isFinite(best) ? best : null))}${sum.best_agent != null ? ` (agent_${sum.best_agent})` : ""}</div>
+      ${sum.llms ? `<div>models</div><div>${esc(Object.entries(sum.llms).map(([k, v]) => `${k}: ${typeof v === "string" ? v : v.model}`).join(" · "))}</div>` : ""}
+      ${sum.conversation_cycles != null ? `<div>conversation cycles</div><div>${sum.conversation_cycles}</div>` : ""}
+      ${sum.prompts_file ? `<div>prompts</div><div>${esc(sum.prompts_file)}</div>` : ""}
+    </div></div>
+    <div class="card"><h2>Validation Dice (mean over seeds)</h2>
+      ${ledger.length ? `<div class="tablewrap"><table><tr><th>agent</th>${rounds.map(r => `<th>round ${r}</th>`).join("")}</tr>
+        ${agents.map(a => `<tr><th style="color:${agentColor("agent_" + a)}">agent_${a}${modelOf(a) ? `<br><span class="muted" style="font-weight:400">${esc(modelOf(a))}</span>` : ""}</th>${rounds.map(r => cell(r, a)).join("")}</tr>`).join("")}
+      </table></div>` : '<p class="empty">No pipeline has finished yet.</p>'}
+    </div>
+    ${conv.length ? `<div class="card"><h2>Conversation activity</h2><div class="tablewrap"><table>
+      <tr><th>round</th><th>agent</th><th>posts</th><th>passes</th><th>checks</th><th>tool calls</th><th>corpus queries</th><th>web queries</th></tr>
+      ${conv.map(e => `<tr><td>${e.round}</td><td>agent_${e.agent_idx}</td><td>${e.posts}</td><td>${e.passes}</td><td>${e.checks_requested}</td>
+        <td>${e.tool_calls}</td><td>${(e.rag_queries || []).length}</td><td>${(e.web_queries || []).length}</td></tr>`).join("")}
+    </table></div></div>` : ""}`;
+}
+
+// ---------------------------------------------------------------- rounds
+const AGENT_FILES = [
+  ["pipeline.py", "Pipeline"], ["notebook.md", "Notebook"], ["build_transcript.md", "Build conversation"],
+  ["fix_transcript.md", "Debug fixes"], ["driver_stdout.json", "Run log"], ["talk_transcript.md", "Blackboard turns"],
+  ["seed_papers.md", "Seed papers"],
+];
+const KNOWN_ROUND = ["observer.md", "observer_tables.md", "observer_transcript.md", "blackboard.md", "blackboard.jsonl"];
+
+function renderRound(view, rnd) {
+  if (!rnd) { view.innerHTML = '<p class="empty">Round not found.</p>'; return; }
+  const run = S.run, r = rnd.round, base = `round_${r}`;
+  const ledgerRow = a => run.ledger.find(e => e.round === r && String(e.agent_idx) === String(a));
+  const has = f => rnd.files.includes(`${base}/${f}`);
+  const otherRound = rnd.files.filter(f => !KNOWN_ROUND.includes(f.split("/").pop()));
+  view.innerHTML = `
+    <div class="card"><h2>1 · Pipelines</h2>
+      ${Object.entries(rnd.agents).map(([a, files]) => {
+        const e = ledgerRow(a);
+        const status = !e ? '<span class="badge live">building…</span>'
+          : e.success ? `<span class="badge ok">Dice ${fmt(e.dice)}</span>` : `<span class="badge bad">failed</span>`;
+        const avail = AGENT_FILES.filter(([f]) => files.includes(`${base}/agent_${a}/${f}`));
+        const extra = files.filter(f => !AGENT_FILES.some(([k]) => f.endsWith("/" + k)));
+        return `<div class="card" style="margin:10px 0 0">
+          <div class="agent-head"><h3 style="color:${agentColor("agent_" + a)}">agent_${a}</h3><span class="muted">${esc(modelOf(a))}</span>${status}
+            ${e ? `<span class="muted">${e.debug_iters ?? 0} debug fix(es) · ${e.build_tool_calls ?? 0} tool call(s)${e.error ? " · " + esc(String(e.error).slice(0, 120)) : ""}</span>` : ""}</div>
+          <div class="subtabs" data-agent="${a}">
+            ${avail.map(([f, l]) => `<button data-file="${base}/agent_${a}/${f}">${l}</button>`).join("")}
+            ${extra.map(f => `<button data-file="${f}">${esc(f.split("/").pop())}</button>`).join("")}
+          </div>
+          <div class="agent-body" id="ab-${r}-${a}"></div>
+        </div>`;
+      }).join("") || '<p class="empty">No agent folders yet.</p>'}
+    </div>
+    <div class="card"><h2>2 · Observer</h2><div id="obs"></div></div>
+    <div class="card"><h2>3 · Blackboard</h2><div id="board"></div></div>
+    <div class="card"><h2>4 · Hypothesis checks</h2><div id="checks"></div></div>
+    ${otherRound.length ? `<div class="card"><h2>Other round files</h2><div id="other"></div></div>` : ""}`;
+
+  // agent file tabs (lazy)
+  view.querySelectorAll(".subtabs").forEach(bar => {
+    const a = bar.dataset.agent, key = `${r}-${a}`;
+    const buttons = [...bar.querySelectorAll("button")];
+    const open = async btn => {
+      buttons.forEach(b => b.classList.toggle("active", b === btn));
+      S.sub[key] = btn.dataset.file;
+      const body = $(`#ab-${r}-${a}`);
+      body.innerHTML = '<p class="muted">loading…</p>';
+      body.innerHTML = renderFile(btn.dataset.file, await getFile(btn.dataset.file));
+      highlight(body);
+    };
+    buttons.forEach(b => b.onclick = () => open(b));
+    const pre = buttons.find(b => b.dataset.file === S.sub[key]) || buttons[0];
+    if (pre) open(pre);
+  });
+
+  // observer
+  (async () => {
+    const el = $("#obs");
+    if (!has("observer.md")) { el.innerHTML = '<p class="empty">The observer has not run for this round yet.</p>'; return; }
+    const [rep, tab] = [await getFile(`${base}/observer.md`), has("observer_tables.md") ? await getFile(`${base}/observer_tables.md`) : null];
+    el.innerHTML = `${md(rep)}
+      ${tab ? `<details class="msg"><summary>Metric tables (code-computed)</summary><div class="body">${md(tab)}</div></details>` : ""}
+      ${has("observer_transcript.md") ? `<details class="msg" id="obs-tr"><summary>Observer prompt & answer</summary><div class="body"></div></details>` : ""}`;
+    const tr = $("#obs-tr");
+    if (tr) tr.ontoggle = async () => { if (tr.open && !tr.dataset.l) { tr.dataset.l = 1; $(".body", tr).innerHTML = renderTranscript(await getFile(`${base}/observer_transcript.md`)); highlight(tr); } };
+    highlight(el);
+  })();
+
+  // blackboard
+  $("#board").innerHTML = rnd.blackboard.length ? rnd.blackboard.map(p => {
+    const label = p.kind === "check_request" ? `${p.author} → HYPOTHESIS CHECKER` : p.kind === "check_result" ? "HYPOTHESIS CHECKER" : p.author;
+    return `<div class="post ${p.kind}" style="--c:${agentColor(p.author)}">
+      <div class="who">${esc(label)} <span class="muted" style="font-weight:400">· cycle ${p.cycle + 1}</span></div>${md(p.text)}</div>`;
+  }).join("") : '<p class="empty">No posts this round (yet).</p>';
+
+  // checks
+  const checks = rnd.checker.filter(f => /check_\d+\.md$/.test(f));
+  const scripts = rnd.checker.filter(f => f.endsWith(".py"));
+  $("#checks").innerHTML = checks.length ? checks.map((f, i) => `<details class="msg" data-f="${f}"><summary>${esc(f.split("/").pop())}</summary><div class="body"></div></details>`).join("")
+    + (scripts.length ? `<details class="msg"><summary>${scripts.length} analysis script(s)</summary><div class="body">${scripts.map(f => `<div data-script="${f}"><b>${esc(f.split("/").pop())}</b></div>`).join("")}</div></details>` : "")
+    : '<p class="empty">No hypothesis checks this round.</p>';
+  $("#checks").querySelectorAll("details[data-f]").forEach(d => d.ontoggle = async () => {
+    if (d.open && !d.dataset.l) { d.dataset.l = 1; $(".body", d).innerHTML = renderTranscript(await getFile(d.dataset.f)); highlight(d); }
+  });
+  $("#checks").querySelectorAll("[data-script]").forEach(async el => { el.insertAdjacentHTML("beforeend", codeBlock(await getFile(el.dataset.script) || "")); highlight(el); });
+
+  if (otherRound.length) renderFileList($("#other"), otherRound, null);
+}
+
+function renderFile(path, text) {
+  if (text == null) return '<p class="empty">Could not read the file.</p>';
+  const name = path.split("/").pop();
+  if (name.endsWith(".py")) return codeBlock(text);
+  if (name === "driver_stdout.json") {
+    try {
+      return JSON.parse(text).map(a => `<details class="msg ${a.status === "ok" ? "answer" : "tool"}" ${a.status !== "ok" ? "" : "open"}>
+        <summary>attempt ${a.attempt} · seed ${a.seed} · ${a.status === "ok" ? `ok · Dice ${fmt(a.dice)}` : esc(String(a.error || "error").slice(0, 140))}</summary>
+        <div class="body">${a.traceback ? `<pre>${esc(a.traceback)}</pre>` : ""}${a.hparams ? codeBlock(JSON.stringify(a.hparams, null, 2), "json") : ""}</div></details>`).join("");
+    } catch (e) { return `<pre>${esc(text)}</pre>`; }
+  }
+  if (name.endsWith(".json") || name.endsWith(".jsonl") || name.endsWith(".yaml") || name.endsWith(".yml"))
+    return codeBlock(text, name.endsWith(".yaml") || name.endsWith(".yml") ? "yaml" : "json");
+  if (/transcript\.md$/.test(name) || /^check_\d+\.md$/.test(name)) return renderTranscript(text);
+  return md(text);
+}
+
+// Transcripts: sections delimited by "===== [kind] =====" lines (agents/swarm_agent.py::transcript).
+function renderTranscript(text) {
+  if (text == null) return '<p class="empty">Could not read the file.</p>';
+  const re = /^===== \[(.+?)\] =====$/gm;
+  if (!re.test(text)) return md(text);
+  re.lastIndex = 0;
+  const parts = [];
+  let m, last = null, head = "";
+  while ((m = re.exec(text))) {
+    if (last) parts.push({ kind: last.kind, body: text.slice(last.end, m.index) });
+    else head = text.slice(0, m.index);
+    last = { kind: m[1], end: m.index + m[0].length };
+  }
+  if (last) parts.push({ kind: last.kind, body: text.slice(last.end) });
+  return (head.trim() ? md(head) : "") + parts.map(p => {
+    const k = p.kind;
+    const cls = k === "system" ? "system" : k === "input" ? "input" : k.startsWith("tool") ? "tool" : k === "answer" ? "answer" : "";
+    const open = k === "answer" || k.startsWith("tool call");
+    const body = k.startsWith("tool call") ? codeBlock(p.body.trim(), "json")
+      : k.startsWith("tool result") ? `<pre>${esc(p.body.trim())}</pre>` : md(p.body);
+    const size = p.body.length > 2000 ? ` <span class="muted" style="font-weight:400">· ${(p.body.length / 1000).toFixed(1)}k chars</span>` : "";
+    return `<details class="msg ${cls}" ${open ? "open" : ""}><summary>${esc(k)}${size}</summary><div class="body">${body}</div></details>`;
+  }).join("");
+}
+
+function renderFileList(el, files, title) {
+  el.innerHTML = (title ? `<div class="card"><h2>${esc(title)}</h2>` : "") +
+    (files.length ? files.map(f => `<details class="msg" data-f="${f}"><summary>${esc(f)}</summary><div class="body"></div></details>`).join("") : '<p class="empty">No files.</p>') +
+    (title ? "</div>" : "");
+  el.querySelectorAll("details[data-f]").forEach(d => d.ontoggle = async () => {
+    if (d.open && !d.dataset.l) { d.dataset.l = 1; $(".body", d).innerHTML = renderFile(d.dataset.f, await getFile(d.dataset.f)); highlight(d); }
+  });
+}
+
+// ---------------------------------------------------------------- refresh
+let timer = null;
+$("#refresh").onclick = async () => { await loadRuns(); if (S.sel) await loadRun(); };
+$("#auto").onchange = e => {
+  clearInterval(timer);
+  if (e.target.checked) timer = setInterval(async () => { await loadRuns(); if (S.sel) await loadRun(); }, 10000);
+};
+(async () => {
+  await loadRuns();
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem("autolsm-sel")); } catch (e) {}
+  if (saved && S.runs.some(r => r.dir === saved.dir && r.run_id === saved.id)) selectRun(saved.dir, saved.id);
+})();
+</script>
+</body>
+</html>

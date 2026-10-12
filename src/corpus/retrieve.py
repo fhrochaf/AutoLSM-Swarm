@@ -9,12 +9,20 @@ from corpus.ingest import get_embeddings
 from corpus.pdf_extract import get_full_text
 
 
+_STORES: dict[tuple[str, str], Chroma] = {}
+
+
 def get_vectorstore(settings: Settings) -> Chroma:
-    return Chroma(
-        embedding_function=get_embeddings(settings),
-        persist_directory=str(settings.vector_store_dir),
-        collection_name="landslide_auto_mapping_corpus",
-    )
+    """The corpus index, opened once per (index dir, embedding model) and reused -- the agents'
+    search_corpus tool is called many times per round, and loading the embedding model is slow."""
+    key = (str(settings.vector_store_dir), settings.embedding_model)
+    if key not in _STORES:
+        _STORES[key] = Chroma(
+            embedding_function=get_embeddings(settings),
+            persist_directory=str(settings.vector_store_dir),
+            collection_name="landslide_auto_mapping_corpus",
+        )
+    return _STORES[key]
 
 
 def retrieve(
@@ -103,10 +111,12 @@ def retrieve_diverse(
     return _STRATEGIES[settings.retrieval_strategy](query, settings, n_agents, k or settings.retrieval_k)
 
 
-def format_for_prompt(docs: list[Document], settings: Settings) -> str:
+def format_for_prompt(docs: list[Document], settings: Settings, char_cap: int | None = None) -> str:
     """Format retrieved papers for a prompt: each paper's JSON-summary text (the
-    cheap match) plus an excerpt of its actual full text, hydrated on demand via
+    cheap match) plus an excerpt of its actual full text (at most `char_cap` characters,
+    default settings.full_text_char_cap), hydrated on demand via
     pdf_extract.get_full_text (extracted once, then cached on disk)."""
+    cap = char_cap or settings.full_text_char_cap
     blocks = []
     for d in docs:
         paper_id = d.metadata.get("paper_id", "unknown")
@@ -114,8 +124,8 @@ def format_for_prompt(docs: list[Document], settings: Settings) -> str:
 
         full_text = get_full_text(paper_id, settings)
         if full_text:
-            excerpt = full_text[: settings.full_text_char_cap]
-            if len(full_text) > settings.full_text_char_cap:
+            excerpt = full_text[:cap]
+            if len(full_text) > cap:
                 excerpt += "\n...[truncated]"
             block += f"\n\nFull text excerpt:\n{excerpt}"
         else:

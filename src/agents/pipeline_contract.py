@@ -24,7 +24,7 @@ class ContractError(Exception):
 
 def validate_module(mod: ModuleType) -> None:
     """Static checks: required functions exist, are callable, train() is documented, and
-    HPARAMS declares the tunables (the handle the velocity's parametric changes point at)."""
+    HPARAMS declares the tunables (so changes to them are explicit and logged per round)."""
     errors = []
     for name in REQUIRED_FUNCS:
         func = getattr(mod, name, None)

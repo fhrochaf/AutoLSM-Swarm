@@ -11,9 +11,14 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
 from pathlib import Path
 
-from langchain_chroma import Chroma
+# The embedding model only needs PyTorch. Without this, `transformers` also imports TensorFlow
+# (installed for the agents' pipelines), which is slow and can break or hang the import.
+os.environ.setdefault("USE_TF", "0")
+
+from langchain_chroma import Chroma  # noqa: E402
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 

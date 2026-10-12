@@ -1,11 +1,10 @@
 """Deterministic, text-ready behavioral comparison of every agent's validation-set
-predictions -- the facts behind the peer observation O_i (AgentPSO, Hwang et al., 2026).
+predictions -- the facts behind the OBSERVER's report.
 
 Nothing here touches an LLM or agent code: it only sees each agent's predicted binary
 masks and the ground truth, on the same tiles, so every number is comparable across
-agents. orchestration/peer_review.py feeds the formatted tables to the peer-review LLM
-(call A); its report is what every agent reflects on (call B). An agent's peers are
-described by *how their pipelines behave*, never by their code.
+agents. orchestration/observer.py feeds the formatted tables to the OBSERVER, whose report
+(with the tables) is the shared context of the agents' conversation.
 """
 from __future__ import annotations
 

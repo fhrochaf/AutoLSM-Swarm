@@ -1,6 +1,7 @@
 """The run -> debug-loop cycle: keeps fixing pipeline.py from the traceback until it runs
 end-to-end under every evaluation seed and passes the contract, or gives up after
-max_debug_iters.
+max_debug_iters. `fix(code, error_message) -> code` is the agent's own fix
+(agents/swarm_agent.py::fix_pipeline).
 
 One "run" is one driver.py subprocess per seed (AUTOLSM_SEED=<seed>), each training the
 pipeline from scratch. The score is the mean over seeds; a crash on any seed sends the
@@ -12,14 +13,13 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
-from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel, Field
 
 from agents import artifacts
-from agents.codegen import fix_pipeline
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SRC_DIR = REPO_ROOT / "src"
@@ -57,7 +57,7 @@ def _run_once(pipeline_path: Path, data_npz_path: Path, timeout_s: int, seed: in
     except json.JSONDecodeError:
         return {
             "status": "error",
-            "error": "driver produced no parseable result",
+            "error": f"driver produced no parseable result (exit code {proc.returncode})",
             "traceback": f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}",
         }
 
@@ -65,7 +65,7 @@ def _run_once(pipeline_path: Path, data_npz_path: Path, timeout_s: int, seed: in
 def run_agent_round(
     agent_dir: Path,
     initial_code: str,
-    code_llm: BaseChatModel,
+    fix: Callable[[str, str], str],
     data_npz_path: Path,
     max_debug_iters: int,
     timeout_s: int,
@@ -110,7 +110,7 @@ def run_agent_round(
         error_message = failure["error"]
         if failure.get("traceback"):
             error_message = f"{error_message}\n{failure['traceback']}"
-        code = fix_pipeline(code_llm, code, error_message)
+        code = fix(code, error_message)
 
     (agent_dir / "driver_stdout.json").write_text(
         json.dumps(attempts, indent=2), encoding="utf-8"

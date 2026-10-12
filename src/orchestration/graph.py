@@ -1,464 +1,485 @@
-"""The round loop, wired as a LangGraph StateGraph.
+"""The conversational swarm, wired as a LangGraph StateGraph.
 
-Round 0 seeds every agent from the literature corpus and generates its first
-pipeline.py. Later rounds first run one peer review (every agent's behavior on the same
-validation tiles), then ask peer_review to revise each agent's pipeline.py against that
-review, the swarm's global-best and its own personal-best. pipeline.py is the only
-artifact an agent owns; there is no separate strategy document.
+    START -> seed -> build_0 -> ... -> build_{N-1} -> update_bests -> observer --(last round / plateau)--> finalize -> END
+                       ^                                                  |
+                       |                                                  v
+                       +---(cycles done / all PASS)--- next_speaker <--> talk_i --(check request)--> hypothesis_checker
+                                                            ^                                               |
+                                                            +-----------------------------------------------+
 
-SwarmState/AgentState are pydantic models (orchestration/state.py). LangGraph passes an
-actual model instance into each node (attribute access below), and node functions
-return a plain dict of the fields that changed -- LangGraph merges that back into the
-persisted state. `graph.invoke(...)` itself always returns a plain dict regardless of
-the schema type, not a model instance.
+    seed                (round 0) each agent gets its own papers from the corpus (corpus/retrieve.py)
+    build_i             agent i writes its pipeline.py (create_agent with corpus + web search tools),
+                        which is run and scored right away (agents/runner.py -> driver.py subprocess)
+    update_bests        personal-best / global-best / plateau counter
+    observer            metric tables of every agent + the OBSERVER's comparative report (shared)
+    next_speaker        round-robin over the agents (order rotated every round), conversation_cycles
+                        cycles; a cycle in which every agent PASSes ends the conversation early
+    talk_i              agent i reads the shared + private context and posts one message to the
+                        blackboard (or PASSes); its tool results stay private. If it called
+                        request_hypothesis_check, control is handed to the checker
+    hypothesis_checker  runs analysis scripts over the round's validation predictions and posts the
+                        numbers to the blackboard
+    finalize            summary.json, g_best_pipeline.py, run registry
+
+The whole state is checkpointed to <run>/checkpoints.sqlite after every node (thread_id = run
+id), so main.py --resume continues from exactly where a run stopped.
 """
 from __future__ import annotations
 
 import json
-import random
+import sqlite3
 import time
+from functools import partial
 from pathlib import Path
 
-from langchain.chat_models import init_chat_model
 import numpy as np
-from langchain_core.documents import Document
-from langgraph.graph import END, StateGraph
-
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command
 from tqdm import tqdm
 
-from agents import artifacts
-from agents.codegen import generate_initial_pipeline
-from agents.prompts import PROMPTS_PATH
-from agents.prompts import RETRIEVAL_QUERY
+from agents import artifacts, checker, context, swarm_agent
+from agents.prompts import PROMPTS_PATH, RETRIEVAL_QUERY
 from agents.runner import run_agent_round
+from agents.text_utils import changed_hparams, extract_cited_papers
 from config import Settings
 from corpus.retrieve import format_for_prompt, retrieve_diverse
 from eval import observe
-from orchestration import peer_review, registry
-from orchestration.state import AgentState, SwarmState
+from orchestration import blackboard, observer, registry
+from orchestration.state import CHECKPOINT_TYPES, AgentState, PendingCheck, Post, SwarmState
 from utils import git_version
 
-
-def new_run_id() -> str:
-    return time.strftime("%Y%m%d_%H%M%S")
-
-
-def _append_ledger(runs_dir: Path, run_id: str, entry: dict) -> None:
-    ledger_path = runs_dir / run_id / "ledger.jsonl"
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    with ledger_path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
-
-
-def _read_ledger(runs_dir: Path, run_id: str) -> list[dict]:
-    ledger_path = runs_dir / run_id / "ledger.jsonl"
-    if not ledger_path.exists():
-        return []
-    with ledger_path.open("r", encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
-
-
-def create_initial_state(settings: Settings, run_id: str, data_npz_path: Path) -> SwarmState:
-    agents = [AgentState(agent_idx=i) for i in range(settings.n_agents)]
-    return SwarmState(
-        run_id=run_id,
-        n_rounds=settings.n_rounds,
-        data_npz_path=str(data_npz_path),
-        agents=agents,
-    )
-
-
-def load_run_state(run_id: str, settings: Settings, target_n_rounds: int) -> SwarmState:
-    """Reconstruct a SwarmState from an existing run's checkpoint to keep training it.
-
-    Reads only runs/<run_id>/state_snapshot.json -- the single, always-overwritten
-    checkpoint _run_round_node writes after every agent (not just every round) -- and
-    the run's kept dataset cache. No earlier round's files are read: the snapshot
-    already holds every agent's current velocity/p_best/pipeline code and the swarm's
-    global-best, so there is nothing to replay. If the snapshot was taken mid-round
-    (some but not all agents done), `state.in_progress_agents` carries those agents'
-    already-finished results and `_run_round_node` skips re-running them.
-    """
-    run_dir = settings.runs_dir / run_id
-    snapshot_path = run_dir / "state_snapshot.json"
-    if not snapshot_path.exists():
-        raise SystemExit(
-            f"No state_snapshot.json found for run {run_id!r} under {run_dir}. "
-            "Either the run id is wrong, or it predates the resume feature."
-        )
-
-    data_npz_path = run_dir / "_data_cache.npz"
-    if not data_npz_path.exists():
-        raise SystemExit(
-            f"No cached dataset (_data_cache.npz) found for run {run_id!r} under "
-            f"{run_dir}. Resuming requires the exact train/val tiles the original "
-            "rounds were scored against; it cannot be rebuilt from scratch."
-        )
-
-    state = SwarmState.model_validate_json(snapshot_path.read_text(encoding="utf-8"))
-
-    if target_n_rounds <= state.round:
-        raise SystemExit(
-            f"Run {run_id!r} already completed round {state.round - 1} "
-            f"(next round would be {state.round}). Pass --rounds greater than "
-            f"{state.round} to continue training it."
-        )
-
-    return state.model_copy(
-        update={
-            "n_rounds": target_n_rounds,
-            "data_npz_path": str(data_npz_path),
-            # A prior plateau stop shouldn't immediately re-trigger on resume -- the
-            # user is explicitly asking for more rounds, so give it a fresh patience
-            # window. The plateau rule itself (settings.plateau_patience) is unchanged.
-            "rounds_without_improvement": 0,
-        }
-    )
-
-
-def _make_llm(provider: str, model: str, api_key: str, max_tokens: int):
-    return init_chat_model(
-        model=model,
-        model_provider=provider,
-        api_key=api_key or None,
-        # temperature=settings.temperature,
-        max_tokens=max_tokens,
-    )
-
+LEDGER = "ledger.jsonl"  # one row per agent per round: the pipeline it built and how it scored
+CONVERSATION_LEDGER = "conversation_ledger.jsonl"  # one row per agent per round: what it did in the conversation
 
 # Compact per-run behavior figures stored in the ledger (the full tables live in each
-# round's peer_review_tables.md), so a run can be analyzed without reloading predictions.
+# round's observer_tables.md), so a run can be analyzed without reloading predictions.
 _LEDGER_METRICS = (
     "precision", "recall", "tile_precision", "tile_recall", "fp_tiles", "object_recall",
     "object_precision", "pred_pos_rate", "true_pos_rate",
 )
 
 
-def _run_round_node(state: SwarmState, settings: Settings) -> dict:
-    # Primary: Reflect / GroundReflection / VelocityUpdate. Peer review (role 2): the
-    # per-round comparative report. Code (role 3): every pipeline.py write and fix.
-    llm = _make_llm(settings.llm_provider, settings.model_name, settings.api_key, settings.max_tokens)
-    peer_review_llm = _make_llm(settings.llm_provider_2, settings.model_name_2, settings.api_key_2, settings.max_tokens_2)
-    code_llm = _make_llm(settings.llm_provider_3, settings.model_name_3, settings.api_key_3, settings.max_tokens_3)
+def new_run_id() -> str:
+    return time.strftime("%Y%m%d_%H%M%S")
 
-    round_idx = state.round
-    data_npz_path = Path(state.data_npz_path)
-    snapshot_path = settings.runs_dir / state.run_id / "state_snapshot.json"
-    y_val = np.load(data_npz_path)["y_val"]
-    size_edges = observe.size_edges(y_val)
-    seeds = settings.active_seeds()
 
-    # Agents already checkpointed for this round (e.g. resuming after a mid-round
-    # interrupt) are skipped -- their results are reused as-is instead of rerun.
-    in_progress = dict(state.in_progress_agents)
-    remaining = [a for a in state.agents if a.agent_idx not in in_progress]
+def _append_jsonl(path: Path, entry: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
 
-    def _checkpoint() -> None:
-        snapshot_path.write_text(
-            state.model_copy(update={"in_progress_agents": dict(in_progress)}).model_dump_json(indent=2),
-            encoding="utf-8",
-        )
 
-    tqdm.write(f"\n=== Round {round_idx}/{state.n_rounds - 1} ===")
-    if in_progress:
-        tqdm.write(f"round {round_idx}: resuming -- {len(in_progress)} agent(s) already done this round")
+def read_ledger(runs_dir: Path, run_id: str, name: str = LEDGER) -> list[dict]:
+    """Rows of a run's ledger, one per (round, agent): a node re-run after a resume appends
+    its row again, and the later row wins."""
+    path = runs_dir / run_id / name
+    if not path.exists():
+        return []
+    rows: dict[tuple[int, int], dict] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            e = json.loads(line)
+            rows[(e["round"], e["agent_idx"])] = e
+    return [rows[k] for k in sorted(rows)]
 
-    agent_docs: list[list[Document]] = []
-    review = None
-    if round_idx == 0 and remaining and not settings.use_rag:
-        tqdm.write(f"round {round_idx}: use_rag is off -- no corpus retrieval")
-        agent_docs = [[] for _ in state.agents]
-    elif round_idx == 0 and remaining:
-        # First round: no prior result to react to -- every agent starts from the same
-        # dataset-derived query (RETRIEVAL_QUERY, "how do I map this kind of target given
-        # this kind of dataset"), but retrieve_diverse shards one shared candidate pool
-        # round-robin across agents so they don't all ground themselves in the same
-        # top-k papers.
-        tqdm.write(f"round {round_idx}: retrieving literature from the corpus for {len(state.agents)} agent(s)...")
-        agent_docs = retrieve_diverse(RETRIEVAL_QUERY, settings, len(state.agents))
-    elif remaining:
-        # Call A: one peer review for the whole swarm, from last round's validation predictions.
-        tqdm.write(f"round {round_idx}: peer review of round {round_idx - 1}...")
-        review = peer_review.run_peer_review(peer_review_llm, state, settings, settings.runs_dir)
 
-    agent_bar = tqdm(remaining, desc=f"round {round_idx}", unit="agent")
-
-    # Fixed random subset of agents that always get an enriched reflection. Seeded from
-    # settings.seed so the same agents are picked every round (and after a resume).
-    n_random_enriched = 0
-    if settings.random_enriched_reflection > 0:
-        n_random_enriched = max(1, round(settings.random_enriched_reflection * len(state.agents)))
-    random_enriched_agents = set(
-        random.Random(settings.seed).sample([a.agent_idx for a in state.agents], min(n_random_enriched, len(state.agents)))
+def create_initial_state(run_id: str, models: list[str], data_npz_path: Path) -> SwarmState:
+    """`models`: the "<provider>/<model>" label of every agent, in agent_idx order."""
+    return SwarmState(
+        run_id=run_id,
+        data_npz_path=str(data_npz_path),
+        agents=[AgentState(agent_idx=i, model=m) for i, m in enumerate(models)],
     )
 
-    for agent in agent_bar:
-        tag = f"[round {round_idx} | agent {agent.agent_idx}]"
-        agent_bar.set_postfix_str(f"agent {agent.agent_idx}")
-        agent_dir = artifacts.agent_round_dir(
-            settings.runs_dir, state.run_id, round_idx, agent.agent_idx
+
+def open_checkpointer(run_dir: Path) -> SqliteSaver:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(run_dir / "checkpoints.sqlite", check_same_thread=False)
+    return SqliteSaver(conn, serde=JsonPlusSerializer(allowed_msgpack_modules=CHECKPOINT_TYPES))
+
+
+def _with_agent(state: SwarmState, agent: AgentState) -> list[AgentState]:
+    return [agent if a.agent_idx == agent.agent_idx else a for a in state.agents]
+
+
+# --------------------------------------------------------------------------------------
+# Pipelines: seed -> build_i -> update_bests
+# --------------------------------------------------------------------------------------
+
+
+def _seed_node(state: SwarmState, settings: Settings) -> dict:
+    if not settings.use_rag:
+        tqdm.write("seed: use_rag is off -- agents start without literature")
+        return {}
+    tqdm.write(f"seed: retrieving literature from the corpus for {len(state.agents)} agent(s)...")
+    docs_per_agent = retrieve_diverse(RETRIEVAL_QUERY, settings, len(state.agents))
+    agents = []
+    for agent, docs in zip(state.agents, docs_per_agent):
+        agent_dir = artifacts.agent_round_dir(settings.runs_dir, state.run_id, 0, agent.agent_idx)
+        artifacts.write_text(agent_dir, "seed_papers.md", format_for_prompt(docs, settings))
+        agents.append(agent.model_copy(update={"seed_paper_ids": [d.metadata.get("paper_id", "unknown") for d in docs]}))
+    return {"agents": agents}
+
+
+def _build_node(state: SwarmState, settings: Settings, agent_idx: int) -> dict:
+    agent = state.agents[agent_idx]
+    round_idx, n_agents = state.round, len(state.agents)
+    tag = f"[round {round_idx} | agent {agent_idx} | {agent.model}]"
+    agent_dir = artifacts.agent_round_dir(settings.runs_dir, state.run_id, round_idx, agent_idx)
+    seeds = settings.active_seeds()
+    if round_idx == 0:
+        if agent_idx == 0:
+            tqdm.write(f"\n=== Round 0/{settings.n_rounds - 1} ===")
+        seed_path = agent_dir / "seed_papers.md"
+        seed_papers = seed_path.read_text(encoding="utf-8") if seed_path.exists() else None
+        messages = context.build_messages(state, agent_idx, "build_initial", settings, seed_papers)
+    else:
+        messages = context.build_messages(state, agent_idx, "build", settings)
+
+    tqdm.write(f"{tag} writing pipeline.py...")
+    build = swarm_agent.build_pipeline(agent_idx, n_agents, messages, settings)
+    artifacts.write_text(agent_dir, "build_transcript.md", build.transcript)
+    notebook = build.notebook or agent.notebook
+    artifacts.write_text(agent_dir, "notebook.md", notebook)
+
+    tqdm.write(
+        f"{tag} running pipeline (train + evaluate, up to {settings.max_debug_iters} debug iters; "
+        f"{build.stats['tool_calls']} tool call(s) while writing)..."
+    )
+    def fix(code: str, error: str) -> str:
+        fixed, log = swarm_agent.fix_pipeline(agent_idx, n_agents, settings, code, error)
+        with (agent_dir / "fix_transcript.md").open("a", encoding="utf-8") as f:
+            f.write(log + "\n")
+        return fixed
+
+    result = run_agent_round(
+        agent_dir,
+        build.code,
+        fix,
+        Path(state.data_npz_path),
+        settings.max_debug_iters,
+        settings.exec_timeout_s,
+        seeds,
+    )
+
+    metrics = None
+    if result.success:
+        tqdm.write(
+            f"{tag} done: Dice={result.dice:.4f} ± {result.dice_std:.4f} over {len(seeds)} seed(s) "
+            f"IoU={result.iou:.4f} (debug iters: {result.debug_iters})"
         )
-        changed_lines = None
-        fidelity = None
+        y_val = np.load(state.data_npz_path)["y_val"]
+        preds = np.load(artifacts.val_preds_path(agent_dir, seeds[0]))["preds"]
+        full = observe.agent_metrics(preds, y_val, observe.size_edges(y_val))
+        metrics = {k: full[k] for k in _LEDGER_METRICS}
+    else:
+        tqdm.write(f"{tag} FAILED after {result.debug_iters} debug iter(s): {result.error}")
 
-        if round_idx == 0:
-            docs = agent_docs[agent.agent_idx]
-            if settings.use_rag:
-                tqdm.write(f"{tag} retrieved {len(docs)} paper(s); writing initial pipeline.py...")
-                code = generate_initial_pipeline(code_llm, format_for_prompt(docs, settings))
-            else:
-                tqdm.write(f"{tag} writing initial pipeline.py without literature...")
-                code = generate_initial_pipeline(code_llm, None)
-            velocity = agent.velocity
-            velocity_history = agent.velocity_history
-            retrieved_papers = [d.metadata.get("paper_id", "unknown") for d in docs]
-        else:
-            enriched_reflection = settings.use_rag and (
-                settings.enriched_reflection_all
-                or (agent.last_dice == state.g_best_score and settings.enriched_leader)
-                or agent.agent_idx in random_enriched_agents
-            )
-            # Later rounds: Reflect (-> GroundReflection) -> VelocityUpdate -> ApplyVelocity
-            # against this round's peer review -- see peer_review.py.
-            tqdm.write(
-                f"{tag} peer review: reflect -> velocity -> pipeline"
-                f"{' -> fidelity check' if settings.fidelity_check else ''}"
-                f"{' (enriched reflection)' if enriched_reflection else ''}..."
-            )
-            update = peer_review.reflect_and_update(
-                llm, code_llm, agent, review, state.g_best_code, state.g_best_score,
-                settings, round_idx, enriched_reflection, judge_llm=peer_review_llm,
-            )
-            code, velocity, velocity_history = update.code, update.velocity, update.velocity_history
-            retrieved_papers, changed_lines = update.retrieved_papers, update.changed_lines
-            fidelity = update.fidelity
-            artifacts.write_text(agent_dir, "reflection.md", update.reflection)
-            if update.original_reflection:
-                artifacts.write_text(agent_dir, "reflection_original.md", update.original_reflection)
-            artifacts.write_text(agent_dir, "velocity.md", update.velocity)
-            if update.velocity_reasoning:
-                artifacts.write_text(agent_dir, "velocity_reasoning.md", update.velocity_reasoning)
-            if fidelity is not None:
-                artifacts.write_text(agent_dir, "fidelity.md", fidelity.report())
-                if fidelity.revisions or not fidelity.faithful:
-                    tqdm.write(
-                        f"{tag} fidelity: {fidelity.revisions} revision(s); "
-                        f"{'now FAITHFUL' if fidelity.faithful else 'still NOT_FAITHFUL -- ' + ('running the latest attempt anyway' if settings.run_unfaithful_pipeline else 'update rejected, re-running the previous pipeline')}"
-                    )
+    score = result.dice if result.success else float("-inf")
+    new_agent = agent.model_copy(
+        update={
+            # The position moves only to a pipeline that ran; a failed attempt leaves the last
+            # working one (unless there has never been one).
+            "pipeline_code": result.final_code if (result.success or not agent.pipeline_code) else agent.pipeline_code,
+            "last_dice": result.dice,
+            "last_dice_per_seed": result.dice_per_seed,
+            "last_dice_std": result.dice_std,
+            "last_iou": result.iou,
+            "last_hparams": result.hparams if result.success else agent.last_hparams,
+            "last_error": None if result.success else result.error,
+            "notebook": notebook,
+        }
+    )
+    if score > new_agent.p_best_score + settings.p_best_epsilon:
+        tqdm.write(f"{tag} new personal-best (Dice={score:.4f})")
+        new_agent = new_agent.model_copy(update={"p_best_code": result.final_code, "p_best_score": score})
 
-        cited_papers = peer_review.extract_cited_papers(code)
+    _append_jsonl(
+        settings.runs_dir / state.run_id / LEDGER,
+        {
+            "round": round_idx,
+            "agent_idx": agent_idx,
+            "model": agent.model,
+            "dice": result.dice,  # mean over the evaluation seeds
+            "dice_per_seed": result.dice_per_seed,
+            "dice_std": result.dice_std,
+            "iou": result.iou,
+            "success": result.success,
+            "error": result.error,
+            "debug_iters": result.debug_iters,
+            "seed_papers": agent.seed_paper_ids if round_idx == 0 else [],
+            "cited_papers": extract_cited_papers(result.final_code),
+            # What the agent looked up while writing this pipeline.
+            **{f"build_{k}": v for k, v in build.stats.items()},
+            "hparams": result.hparams,
+            "hparams_changed": (
+                changed_hparams(agent.last_hparams, result.hparams) if result.success and round_idx > 0 else []
+            ),
+            "metrics": metrics,
+        },
+    )
+    return {"agents": _with_agent(state, new_agent)}
 
-        tqdm.write(f"{tag} running pipeline (train + evaluate, up to {settings.max_debug_iters} debug iters)...")
-        result = run_agent_round(
-            agent_dir,
-            code,
-            code_llm,
-            data_npz_path,
-            settings.max_debug_iters,
-            settings.exec_timeout_s,
-            seeds,
-        )
 
-        metrics = None
-        if result.success:
-            tqdm.write(
-                f"{tag} done: Dice={result.dice:.4f} ± {result.dice_std:.4f} over {len(seeds)} seed(s) "
-                f"IoU={result.iou:.4f} (debug iters: {result.debug_iters})"
-            )
-            preds = np.load(artifacts.val_preds_path(agent_dir, seeds[0]))["preds"]
-            full = observe.agent_metrics(preds, y_val, size_edges)
-            metrics = {k: full[k] for k in _LEDGER_METRICS}
-        else:
-            tqdm.write(f"{tag} FAILED after {result.debug_iters} debug iter(s): {result.error}")
-
-        score = result.dice if result.success else float("-inf")
-        new_agent = agent.model_copy(
-            update={
-                # Position moves only to a pipeline that ran; a failed attempt leaves
-                # the last working one to revise (unless there has never been one).
-                "pipeline_code": result.final_code if (result.success or not agent.pipeline_code) else agent.pipeline_code,
-                "velocity": velocity,
-                "velocity_history": velocity_history,
-                "last_dice": result.dice,
-                "last_dice_per_seed": result.dice_per_seed,
-                "last_dice_std": result.dice_std,
-                "last_iou": result.iou,
-                "last_hparams": result.hparams if result.success else agent.last_hparams,
-                "last_error": None if result.success else result.error,
-            }
-        )
-        if score > new_agent.p_best_score + settings.p_best_epsilon:
-            tqdm.write(f"{tag} new personal-best (Dice={score:.4f})")
-            new_agent = new_agent.model_copy(
-                update={"p_best_code": result.final_code, "p_best_score": score}
-            )
-
-        _append_ledger(
-            settings.runs_dir,
-            state.run_id,
-            {
-                "round": round_idx,
-                "agent_idx": agent.agent_idx,
-                "dice": result.dice,  # mean over the evaluation seeds
-                "dice_per_seed": result.dice_per_seed,
-                "dice_std": result.dice_std,
-                "iou": result.iou,
-                "success": result.success,
-                "error": result.error,
-                "retrieved_papers": retrieved_papers,
-                "cited_papers": cited_papers,
-                "debug_iters": result.debug_iters,
-                # How big the move was (lines added + removed), to audit what each velocity really did.
-                "changed_lines": changed_lines,
-                # Fidelity gate: None when it is off or in round 0 (no velocity to check).
-                "fidelity_faithful": fidelity.faithful if fidelity is not None else None,
-                "fidelity_revisions": fidelity.revisions if fidelity is not None else None,
-                "hparams": result.hparams,
-                "hparams_changed": (
-                    peer_review.changed_hparams(agent.last_hparams, result.hparams)
-                    if result.success and round_idx > 0 else []
-                ),
-                "metrics": metrics,
-            },
-        )
-        in_progress[agent.agent_idx] = new_agent
-        _checkpoint()
-
-    updated_agents = [in_progress[a.agent_idx] for a in state.agents]
-
-    g_best_code, g_best_score = state.g_best_code, state.g_best_score
-    for agent in updated_agents:
+def _update_bests_node(state: SwarmState, settings: Settings) -> dict:
+    g_best_code, g_best_score, g_best_agent = state.g_best_code, state.g_best_score, state.g_best_agent
+    for agent in state.agents:
         if agent.p_best_score > g_best_score + settings.p_best_epsilon:
-            g_best_code, g_best_score = agent.p_best_code, agent.p_best_score
+            g_best_code, g_best_score, g_best_agent = agent.p_best_code, agent.p_best_score, agent.agent_idx
 
     if g_best_score > state.g_best_score + settings.p_best_epsilon:
-        tqdm.write(f"=== Round {round_idx} new global-best: Dice={g_best_score:.4f} ===")
+        tqdm.write(f"=== Round {state.round} new global-best: Dice={g_best_score:.4f} (agent_{g_best_agent}) ===")
         rounds_without_improvement = 0
     else:
         rounds_without_improvement = state.rounds_without_improvement + 1
         tqdm.write(
-            f"=== Round {round_idx}: no global-best improvement "
+            f"=== Round {state.round}: no global-best improvement "
             f"({rounds_without_improvement}/{settings.plateau_patience} before early stop) ==="
         )
-
-    updates = {
-        "round": round_idx + 1,
-        "agents": updated_agents,
+    return {
         "g_best_code": g_best_code,
         "g_best_score": g_best_score,
+        "g_best_agent": g_best_agent,
         "rounds_without_improvement": rounds_without_improvement,
-        "in_progress_agents": {},
     }
 
-    # Single checkpoint file, overwritten after every agent (not just every round):
-    # always holds exactly the state as of the last agent to finish -- this is the only
-    # thing a resumed run reads, whether that's mid-round or a cleanly completed one.
-    snapshot_path.write_text(
-        state.model_copy(update=updates).model_dump_json(indent=2), encoding="utf-8"
+
+# --------------------------------------------------------------------------------------
+# Observation and conversation: observer -> next_speaker <-> talk_i (-> hypothesis_checker)
+# --------------------------------------------------------------------------------------
+
+
+def _observer_node(state: SwarmState, settings: Settings) -> dict:
+    tqdm.write(f"round {state.round}: OBSERVER comparing the agents...")
+    report, tables = observer.run_observer(state, settings)
+    n = len(state.agents)
+    shift = state.round % n
+    # A fresh conversation: the previous round's board was kept until now because the agents
+    # read it while writing this round's pipelines.
+    return {
+        "observer_report": report,
+        "observer_tables": tables,
+        "blackboard": [],
+        "turn_order": list(range(shift, n)) + list(range(shift)),
+        "cycle": 0,
+        "speaker_ptr": 0,
+        "passes_this_cycle": 0,
+        "pending_check": None,
+        "checks_used": 0,
+        "talk_stats": {},
+    }
+
+
+def _route_after_observer(state: SwarmState, settings: Settings) -> str:
+    if state.round + 1 >= settings.n_rounds:
+        return "finalize"
+    if state.rounds_without_improvement >= settings.plateau_patience:
+        return "finalize"
+    return "next_speaker"
+
+
+def _empty_talk_stats() -> dict:
+    return {"posts": 0, "passes": 0, "checks_requested": 0, "tool_calls": 0,
+            "rag_queries": [], "rag_papers": [], "web_queries": []}
+
+
+def _end_conversation(state: SwarmState, settings: Settings, cycle: int, reason: str) -> Command:
+    tqdm.write(f"round {state.round}: conversation over ({reason}); {len(state.blackboard)} post(s) on the blackboard")
+    for agent in state.agents:
+        _append_jsonl(
+            settings.runs_dir / state.run_id / CONVERSATION_LEDGER,
+            {"round": state.round, "agent_idx": agent.agent_idx,
+             **state.talk_stats.get(agent.agent_idx, _empty_talk_stats())},
+        )
+    tqdm.write(f"\n=== Round {state.round + 1}/{settings.n_rounds - 1} ===")
+    return Command(update={"round": state.round + 1, "cycle": cycle}, goto="build_0")
+
+
+def _next_speaker_node(state: SwarmState, settings: Settings) -> Command:
+    n = len(state.agents)
+    ptr, cycle, passes = state.speaker_ptr, state.cycle, state.passes_this_cycle
+    if settings.conversation_cycles <= 0:
+        return _end_conversation(state, settings, cycle, "conversation_cycles is 0")
+    if ptr >= n:  # a full cycle is done
+        all_passed = passes >= n
+        cycle, ptr, passes = cycle + 1, 0, 0
+        if all_passed:
+            return _end_conversation(state, settings, cycle, "every agent passed")
+        if cycle >= settings.conversation_cycles:
+            return _end_conversation(state, settings, cycle, f"{settings.conversation_cycles} cycle(s) done")
+    speaker = state.turn_order[ptr]
+    return Command(
+        update={"cycle": cycle, "speaker_ptr": ptr, "passes_this_cycle": passes},
+        goto=f"talk_{speaker}",
     )
 
-    return updates
+
+def _talk_node(state: SwarmState, settings: Settings, agent_idx: int) -> Command:
+    round_idx, cycle = state.round, state.cycle
+    tag = f"[round {round_idx} | cycle {cycle + 1} | agent {agent_idx}]"
+    checks_left = max(0, settings.max_checks_per_round - state.checks_used)
+    messages = context.build_messages(state, agent_idx, "talk", settings)
+    turn = swarm_agent.take_turn(agent_idx, len(state.agents), messages, settings, checks_left)
+
+    agent_dir = artifacts.agent_round_dir(settings.runs_dir, state.run_id, round_idx, agent_idx)
+    with (agent_dir / "talk_transcript.md").open("a", encoding="utf-8") as f:
+        f.write(f"\n# Cycle {cycle + 1}\n\n{turn.transcript}")
+
+    board = list(state.blackboard)
+    stats = dict(state.talk_stats.get(agent_idx, _empty_talk_stats()))
+    stats["tool_calls"] += turn.stats["tool_calls"]
+    for k in ("rag_queries", "rag_papers", "web_queries"):
+        stats[k] = stats[k] + turn.stats[k]
+
+    if turn.post is not None:
+        board.append(Post(round=round_idx, cycle=cycle, author=f"agent_{agent_idx}", text=turn.post))
+        stats["posts"] += 1
+    update: dict = {"speaker_ptr": state.speaker_ptr + 1}
+    goto = "next_speaker"
+    if turn.check_question is not None and checks_left > 0:
+        board.append(Post(round=round_idx, cycle=cycle, author=f"agent_{agent_idx}", kind="check_request", text=turn.check_question))
+        stats["checks_requested"] += 1
+        update |= {
+            "pending_check": PendingCheck(requester=agent_idx, question=turn.check_question),
+            "checks_used": state.checks_used + 1,
+        }
+        goto = "hypothesis_checker"
+    passed = turn.post is None and goto == "next_speaker"
+    if passed:
+        stats["passes"] += 1
+    tqdm.write(f"{tag} {'PASS' if passed else 'posted'}{' + check request' if goto == 'hypothesis_checker' else ''}")
+
+    blackboard.save_board(artifacts.round_dir(settings.runs_dir, state.run_id, round_idx), board)
+    update |= {
+        "blackboard": board,
+        "passes_this_cycle": state.passes_this_cycle + int(passed),
+        "talk_stats": {**state.talk_stats, agent_idx: stats},
+    }
+    return Command(update=update, goto=goto)
+
+
+def _checker_node(state: SwarmState, settings: Settings) -> dict:
+    pending = state.pending_check
+    tqdm.write(f"round {state.round}: HYPOTHESIS CHECKER answering agent_{pending.requester}...")
+    answer = checker.run_check(state, pending, settings)
+    board = [
+        *state.blackboard,
+        Post(round=state.round, cycle=state.cycle, author="checker", kind="check_result",
+             text=f"(answering agent_{pending.requester})\n{answer}"),
+    ]
+    blackboard.save_board(artifacts.round_dir(settings.runs_dir, state.run_id, state.round), board)
+    return {"blackboard": board, "pending_check": None}
+
+
+# --------------------------------------------------------------------------------------
+# finalize
+# --------------------------------------------------------------------------------------
 
 
 def _finalize_node(state: SwarmState, settings: Settings) -> dict:
     stop_reason = (
-        "plateau"
-        if state.rounds_without_improvement >= settings.plateau_patience
-        else "max_rounds"
+        "plateau" if state.rounds_without_improvement >= settings.plateau_patience else "max_rounds"
     )
-    tqdm.write(f"\n=== Stopping after round {state.round - 1} (reason: {stop_reason}) ===")
+    rounds_run = state.round + 1
+    tqdm.write(f"\n=== Stopping after round {state.round} (reason: {stop_reason}) ===")
 
-    # Per-round history, including the citation trail (which papers were retrieved vs.
-    # actually cited in the pipeline's comments each round).
-    ledger_entries = _read_ledger(settings.runs_dir, state.run_id)
+    ledger = read_ledger(settings.runs_dir, state.run_id)
+    conversation = read_ledger(settings.runs_dir, state.run_id, CONVERSATION_LEDGER)
     per_agent_history = {}
     for a in state.agents:
-        rounds = sorted(
-            (e for e in ledger_entries if e["agent_idx"] == a.agent_idx),
-            key=lambda e: e["round"],
-        )
-        per_agent_history[str(a.agent_idx)] = {
-            "rounds": [
-                {
-                    "round": e["round"],
-                    "dice": e.get("dice"),
-                    "dice_per_seed": e.get("dice_per_seed"),
-                    "dice_std": e.get("dice_std"),
-                    "iou": e.get("iou"),
-                    "success": e.get("success"),
-                    "debug_iters": e.get("debug_iters", 0),
-                    "changed_lines": e.get("changed_lines"),
-                    "fidelity_faithful": e.get("fidelity_faithful"),
-                    "fidelity_revisions": e.get("fidelity_revisions"),
-                    "hparams_changed": e.get("hparams_changed", []),
-                    "retrieved_papers": e.get("retrieved_papers", []),
-                    "cited_papers": e.get("cited_papers", []),
-                }
-                for e in rounds
-            ],
-        }
-
-    best_agent = None
-    for a in state.agents:
-        if a.p_best_score == state.g_best_score:
-            best_agent = a.agent_idx
-            break
+        talk = {e["round"]: e for e in conversation if e["agent_idx"] == a.agent_idx}
+        per_agent_history[str(a.agent_idx)] = [
+            {
+                "round": e["round"],
+                "dice": e.get("dice"),
+                "dice_per_seed": e.get("dice_per_seed"),
+                "dice_std": e.get("dice_std"),
+                "iou": e.get("iou"),
+                "success": e.get("success"),
+                "debug_iters": e.get("debug_iters", 0),
+                "hparams_changed": e.get("hparams_changed", []),
+                "cited_papers": e.get("cited_papers", []),
+                "build_rag_papers": e.get("build_rag_papers", []),
+                "conversation": {k: v for k, v in talk.get(e["round"], {}).items() if k not in ("round", "agent_idx")},
+            }
+            for e in ledger if e["agent_idx"] == a.agent_idx
+        ]
 
     summary = {
         "run_id": state.run_id,
         "git": git_version(),
-        "llms": {
-            "primary": {"provider": settings.llm_provider, "model": settings.model_name},
-            "peer_review": {"provider": settings.llm_provider_2, "model": settings.model_name_2},
-            "code": {"provider": settings.llm_provider_3, "model": settings.model_name_3},
-        },
+        "llms": registry.llms(settings),
         "stop_reason": stop_reason,
         "eval_seeds": settings.active_seeds(),
         "prompts_file": PROMPTS_PATH.name,
-        "rounds_run": state.round,
+        "rounds_run": rounds_run,
+        "conversation_cycles": settings.conversation_cycles,
         "g_best_score": state.g_best_score,
-        "best_agent": best_agent,
+        "best_agent": state.g_best_agent,
         "per_agent_best": [
-            {
-                "agent_idx": a.agent_idx,
-                "p_best_score": a.p_best_score,
-            }
-            for a in state.agents
+            {"agent_idx": a.agent_idx, "model": a.model, "p_best_score": a.p_best_score} for a in state.agents
         ],
         "per_agent_history": per_agent_history,
     }
+    run_dir = settings.runs_dir / state.run_id
     if state.g_best_code:
-        (settings.runs_dir / state.run_id / "g_best_pipeline.py").write_text(
-            state.g_best_code, encoding="utf-8"
-        )
-    summary_path = settings.runs_dir / state.run_id / "summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        (run_dir / "g_best_pipeline.py").write_text(state.g_best_code, encoding="utf-8")
+    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     # One row per run in <runs_dir>/registry.{jsonl,csv}: config + outcome, comparable across runs.
     registry.register_run(
         settings,
-        registry.build_record(settings, state, stop_reason, ledger_entries, summary["git"]),
+        registry.build_record(settings, state, stop_reason, rounds_run, ledger, conversation, summary["git"]),
     )
-    return {}
+    return {"stop_reason": stop_reason}
 
 
-def _should_continue(state: SwarmState, settings: Settings) -> str:
-    if state.round >= state.n_rounds:
-        return "finalize"
-    if state.rounds_without_improvement >= settings.plateau_patience:
-        return "finalize"
-    return "continue"
+# --------------------------------------------------------------------------------------
+# wiring
+# --------------------------------------------------------------------------------------
 
 
-def build_graph(settings: Settings):
+def build_graph(settings: Settings, n_agents: int, checkpointer: SqliteSaver | None = None):
     graph = StateGraph(SwarmState)
-    graph.add_node("run_round", lambda s: _run_round_node(s, settings))
-    graph.add_node("finalize", lambda s: _finalize_node(s, settings))
-    graph.set_entry_point("run_round")
-    graph.add_conditional_edges(
-        "run_round",
-        lambda s: _should_continue(s, settings),
-        {"continue": "run_round", "finalize": "finalize"},
+    graph.add_node("seed", partial(_seed_node, settings=settings))
+    for i in range(n_agents):
+        graph.add_node(f"build_{i}", partial(_build_node, settings=settings, agent_idx=i))
+    graph.add_node("update_bests", partial(_update_bests_node, settings=settings))
+    graph.add_node("observer", partial(_observer_node, settings=settings))
+    graph.add_node(
+        "next_speaker", partial(_next_speaker_node, settings=settings),
+        destinations=tuple(f"talk_{i}" for i in range(n_agents)) + ("build_0",),
     )
+    for i in range(n_agents):
+        graph.add_node(
+            f"talk_{i}", partial(_talk_node, settings=settings, agent_idx=i),
+            destinations=("next_speaker", "hypothesis_checker"),
+        )
+    graph.add_node("hypothesis_checker", partial(_checker_node, settings=settings))
+    graph.add_node("finalize", partial(_finalize_node, settings=settings))
+
+    graph.add_edge(START, "seed")
+    graph.add_edge("seed", "build_0")
+    for i in range(n_agents - 1):
+        graph.add_edge(f"build_{i}", f"build_{i + 1}")
+    graph.add_edge(f"build_{n_agents - 1}", "update_bests")
+    graph.add_edge("update_bests", "observer")
+    graph.add_conditional_edges(
+        "observer", partial(_route_after_observer, settings=settings),
+        {"next_speaker": "next_speaker", "finalize": "finalize"},
+    )
+    graph.add_edge("hypothesis_checker", "next_speaker")
     graph.add_edge("finalize", END)
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
+
+
+def recursion_limit(settings: Settings, n_agents: int, rounds_left: int) -> int:
+    """Upper bound on graph steps for `rounds_left` rounds (LangGraph counts every node run)."""
+    per_round = (
+        n_agents + 2  # builds, update_bests, observer
+        + settings.conversation_cycles * 2 * n_agents + 1  # talk_i + next_speaker per turn
+        + 2 * settings.max_checks_per_round  # checker + next_speaker per check
+    )
+    return per_round * max(rounds_left, 1) + 10

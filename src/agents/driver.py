@@ -16,8 +16,8 @@ Invoked as: python driver.py <src_dir> <pipeline_path> <data_npz_path>
 The seed comes from the AUTOLSM_SEED environment variable (set per run by runner.py; the
 pipeline reads it too), so one pipeline.py is scored under several seeds. Besides scoring,
 the driver writes the pipeline's binary predictions on the validation tiles to
-`val_preds_seed<S>.npz` next to pipeline.py; orchestration/peer_review.py compares those
-across agents (eval/observe.py) to build each round's peer observation.
+`val_preds_seed<S>.npz` next to pipeline.py; orchestration/observer.py compares those
+across agents (eval/observe.py), and the HYPOTHESIS CHECKER analyses them on request.
 
 Prints exactly one JSON line to stdout:
   {"status": "ok", "seed": <int>, "dice": <float>, "iou": <float>, "hparams": {...}}

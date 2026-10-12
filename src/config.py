@@ -187,17 +187,17 @@ class Settings(BaseSettings):
     # before the agents write their next pipelines: round-robin over the agents (the order rotates
     # every round) for this many cycles. An agent may PASS; a cycle in which every agent passes
     # ends the conversation early.
-    conversation_cycles: int = 2
+    conversation_cycles: int = 4
     # The HYPOTHESIS CHECKER (agents/checker.py): at most this many check requests per round
     # (across the whole swarm); per request, at most checker_max_runs analysis scripts, each with
     # a checker_timeout_s budget and its printed output capped at checker_output_char_cap.
     max_checks_per_round: int = 3
     checker_max_runs: int = 4
-    checker_timeout_s: int = 300
-    checker_output_char_cap: int = 6000
+    checker_timeout_s: int = 600
+    checker_output_char_cap: int = 10000
     # Each agent's private notebook -- the only thing it carries from one round to the next besides
     # its pipelines -- is capped at this many characters.
-    notebook_char_cap: int = 2000
+    notebook_char_cap: int = 10000
 
     split_ratios: dict[str, float] = {"train": 0.7, "val": 0.15, "test": 0.15}
     seed: int = 42

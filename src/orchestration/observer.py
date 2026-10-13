@@ -44,6 +44,24 @@ def _detailed_observation(
     )
 
 
+def fit_table(state: SwarmState) -> str:
+    """Train vs validation Dice per agent (both means over the evaluation seeds); "" if no agent
+    has a train Dice (e.g. a run from before it was recorded)."""
+    rows = [a for a in state.agents if a.last_train_dice is not None and a.last_dice is not None]
+    if not rows:
+        return ""
+    lines = [
+        "\n### Fit: train vs validation Dice",
+        "Each pipeline scored on its own training tiles and on the validation tiles. "
+        "train >> val suggests overfitting; both low suggests underfitting.",
+        "| agent | train Dice | validation Dice | gap (train - val) |",
+        "|---|---|---|---|",
+    ]
+    for a in rows:
+        lines.append(f"| {a.agent_idx} | {a.last_train_dice:.3f} | {a.last_dice:.3f} | {a.last_train_dice - a.last_dice:+.3f} |")
+    return "\n".join(lines) + "\n"
+
+
 def observation_tables(state: SwarmState, settings: Settings) -> tuple[str, bool]:
     """The metric tables of the round state.round, and whether any agent produced predictions."""
     y_val = np.load(state.data_npz_path)["y_val"]
@@ -73,6 +91,7 @@ def observation_tables(state: SwarmState, settings: Settings) -> tuple[str, bool
             },
         }
     tables = observe.format_comparison(comparison, failed, seed_dice, table_seed)
+    tables += fit_table(state)
     if settings.observation_detail == "detailed" and preds:
         tables += "\n" + _detailed_observation(preds, y_val, state, settings, table_seed)
     return tables, bool(preds)

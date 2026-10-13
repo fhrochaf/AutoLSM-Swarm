@@ -60,6 +60,9 @@ START → seed → build_0 → … → build_{N-1} → update_bests → observer
    - results by landslide size
    - complementarity between agents
    - Dice across seeds
+   - fit: each pipeline's Dice on its own training tiles next to its validation Dice (train ≫ val
+     suggests overfitting, both low underfitting). The driver scores every pipeline on both
+     splits.
 
    The OBSERVER agent (role-2 LLM) writes a comparative report on those tables. It describes
    and does not prescribe. Report and tables go into every agent's **shared** context.
@@ -81,8 +84,14 @@ START → seed → build_0 → … → build_{N-1} → update_bests → observer
      the turn, the graph hands control to the HYPOTHESIS CHECKER
      ([`src/agents/checker.py`](src/agents/checker.py), role-3 LLM).
    - **Running.** The checker writes Python analysis scripts and runs them (`run_analysis`)
-     in a subprocess over this round's validation predictions of every agent and the
-     validation ground truth. It sees no images, no train split, and never the test split.
+     in a subprocess over the validation split only:
+     - every agent's predictions this round and the ground-truth masks
+     - the observer's difficulty group of each tile (`tile_group`: solved / contested /
+       persistently hard, and clean / intermittent / persistent false alarm)
+     - the validation images `X_val` (bands, slope, DEM, so e.g. NDVI). These are read from the
+       run's `_data_cache.npz` only when a script first uses them.
+
+     It never sees the train or test split.
    - **Answering.** It then posts its numbers on the blackboard.
    - **Limits.** At most `max_checks_per_round` checks per round, one per turn.
 7. After the conversation the next round starts at step 2. The run stops after `n_rounds`,
@@ -204,7 +213,8 @@ set of ~300 landslide-mapping papers.
     `request_hypothesis_check`, with a recorder that logs what each agent looked up.
   - [`checker.py`](src/agents/checker.py) / [`checker_driver.py`](src/agents/checker_driver.py)
     — the HYPOTHESIS CHECKER agent and the subprocess that runs its analysis scripts over a
-    read-only `DATA` dict (val ground truth + every agent's val predictions).
+    read-only `DATA` mapping (val ground truth, every agent's val predictions, tile groups, and
+    `X_val` loaded lazily from the run's data cache).
   - [`runner.py`](src/agents/runner.py) / [`driver.py`](src/agents/driver.py) — run one
     `pipeline.py` end-to-end in a subprocess per seed. Missing libraries are auto-installed,
     and crashes go through the agent's debug loop.
@@ -339,7 +349,7 @@ Each run writes to `<runs_dir>/<run_id>/`:
 - `run_config.json`, `prompts_used.yaml`, `_data_cache.npz`
 - `checkpoints.sqlite` — the LangGraph checkpoint after every node, used by `--resume`
 - `ledger.jsonl` — one row per agent per round:
-  - Dice per seed, IoU and behavior metrics
+  - Dice per seed, IoU, train Dice (same pipeline on its training tiles) and behavior metrics
   - debug iterations, cited papers and changed `HPARAMS`
   - what the agent searched while building
 - `conversation_ledger.jsonl` — one row per agent per round: posts, passes, check requests,

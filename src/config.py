@@ -23,7 +23,7 @@ class AgentGroup(BaseModel):
     llm_provider: str
     model_name: str
     api_key: str = ""  # empty: read from <LLM_PROVIDER>_API_KEY in .env / the environment
-    max_tokens: int = 300000
+    max_tokens: int = 120000
     # Extra keyword arguments for this model's LangChain chat class (init_chat_model), e.g.
     # {"reasoning_effort": "low"}. A value of None removes a default -- e.g. {"temperature": None}
     # for reasoning models that reject a temperature. OpenAI models already go through the
@@ -54,7 +54,8 @@ class Settings(BaseSettings):
     agents: list[AgentGroup] = Field(default_factory=lambda: [
         AgentGroup(n_agents=6, llm_provider="google_genai", model_name="gemini-3.1-flash-lite"),
         AgentGroup(n_agents=3, llm_provider="openai", model_name="gpt-6-luna"),
-        AgentGroup(n_agents=1, llm_provider="anthropic", model_name="claude-sonnet-5")
+        #AgentGroup(n_agents=1, llm_provider="anthropic", model_name="claude-sonnet-5")
+        AgentGroup(n_agents=1, llm_provider="deepseek", model_name="deepseek-v4-pro")
     ])
 
     ################################
@@ -161,10 +162,9 @@ class Settings(BaseSettings):
     # The no-literature baseline.
     use_rag: bool = True
     # The agents' search_corpus tool (agents/tools.py): papers per query, and the per-paper cap on
-    # the full-text excerpt it returns (much smaller than full_text_char_cap, which is for seeding --
-    # an agent may search several times per turn).
+    # the full-text excerpt it returns.
     rag_tool_k: int = 3
-    rag_tool_char_cap: int = 6000
+    rag_tool_char_cap: int = 80000
     # The agents' web_search tool (Tavily; needs TAVILY_API_KEY in .env -- without it the tool is
     # simply not offered).
     web_search: bool = True
@@ -192,11 +192,11 @@ class Settings(BaseSettings):
     # before the agents write their next pipelines: round-robin over the agents (the order rotates
     # every round) for this many cycles. An agent may PASS; a cycle in which every agent passes
     # ends the conversation early.
-    conversation_cycles: int = 4
+    conversation_cycles: int = 3
     # The HYPOTHESIS CHECKER (agents/checker.py): at most this many check requests per round
     # (across the whole swarm); per request, at most checker_max_runs analysis scripts, each with
     # a checker_timeout_s budget and its printed output capped at checker_output_char_cap.
-    max_checks_per_round: int = 3
+    max_checks_per_round: int = 10
     checker_max_runs: int = 4
     checker_timeout_s: int = 600
     checker_output_char_cap: int = 10000
@@ -217,7 +217,7 @@ class Settings(BaseSettings):
     def active_seeds(self) -> list[int]:
         return self.eval_seeds[: self.n_seeds] if self.n_seeds else list(self.eval_seeds)
     
-    max_train_tiles: int = 1500
+    max_train_tiles: int = 3000
     max_debug_iters: int = 5
 
     # Budget for one driver.py subprocess call: package auto-install (agents can now

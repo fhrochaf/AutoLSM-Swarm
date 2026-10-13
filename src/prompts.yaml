@@ -126,6 +126,7 @@ observer:
     - Then state what the agents share (common failure modes, hard tiles) and where they differ, including whether their errors are complementary (oracle and majority-vote figures).
     - The objective is Dice; every other metric is diagnostic. Open each agent's paragraph with its Dice, and for each secondary metric say whether it plausibly explains a Dice difference.
     - The swarm's score is the best Dice any agent reaches (the global best), not the average.
+    - The fit table (train vs validation Dice), when present, tells overfitting from underfitting; say which applies to each agent. It is diagnostic: a smaller gap is only good if validation Dice rises.
     - Describe; do not prescribe what each agent should do next -- that is for the agents to discuss.
 
   user: |

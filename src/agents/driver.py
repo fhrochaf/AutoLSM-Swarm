@@ -20,7 +20,8 @@ the driver writes the pipeline's binary predictions on the validation tiles to
 across agents (eval/observe.py), and the HYPOTHESIS CHECKER analyses them on request.
 
 Prints exactly one JSON line to stdout:
-  {"status": "ok", "seed": <int>, "dice": <float>, "iou": <float>, "hparams": {...}}
+  {"status": "ok", "seed": <int>, "dice": <float>, "iou": <float>, "train_dice": <float|null>,
+   "train_iou": <float|null>, "hparams": {...}}   (dice/iou on the val split, train_* on the train tiles)
   {"status": "error", "error": "<message>", "traceback": "<traceback or "">"}
 Progress/diagnostics (e.g. package installs) go to stderr, never stdout, so they never
 interfere with that single JSON line.
@@ -87,10 +88,20 @@ def _run_pipeline_once(pipeline_path: str, data_npz_path: str) -> dict:
         Path(pipeline_path).with_name(f"val_preds_seed{seed}.npz"), preds=preds.astype(bool)
     )
     y_val = data["y_val"]
+    # The same model scored on the tiles it was trained on: the train/val gap shows over- or
+    # underfitting. Best-effort -- a failure here (e.g. out of memory) does not fail the run.
+    try:
+        train_preds = infer(mod, model, data["X_train"])
+        train_dice, train_iou = dice(train_preds, data["y_train"]), iou(train_preds, data["y_train"])
+    except Exception as exc:  # noqa: BLE001
+        print(f"[driver] train-split scoring failed: {exc!r}", file=sys.stderr)
+        train_dice = train_iou = None
     return {
         "seed": seed,
         "dice": dice(preds, y_val),
         "iou": iou(preds, y_val),
+        "train_dice": train_dice,
+        "train_iou": train_iou,
         "hparams": json.loads(json.dumps(mod.HPARAMS, default=str)),
     }
 

@@ -42,11 +42,17 @@ def _code_block(code: str, settings: Settings) -> str:
 
 
 def scores_table(state: SwarmState) -> str:
-    rows = ["| agent | model | Dice (mean over seeds) | ± std | personal best | status |", "|---|---|---|---|---|---|"]
+    rows = [
+        "| agent | model | Dice (mean over seeds) | ± std | train Dice | personal best | status |",
+        "|---|---|---|---|---|---|---|",
+    ]
     for a in state.agents:
         std = f"{a.last_dice_std:.4f}" if a.last_dice_std is not None else "-"
+        train = f"{a.last_train_dice:.4f}" if a.last_train_dice is not None else "-"
         status = "ok" if a.last_error is None else f"failed: {cap_text(a.last_error, 120, '...')}"
-        rows.append(f"| agent_{a.agent_idx} | {a.model or '-'} | {_score(a.last_dice)} | {std} | {_score(a.p_best_score)} | {status} |")
+        rows.append(
+            f"| agent_{a.agent_idx} | {a.model or '-'} | {_score(a.last_dice)} | {std} | {train} | {_score(a.p_best_score)} | {status} |"
+        )
     return "\n".join(rows)
 
 

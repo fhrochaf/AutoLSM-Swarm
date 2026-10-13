@@ -32,11 +32,17 @@ class RunResult(BaseModel):
     iou: float | None = None  # mean over seeds
     dice_per_seed: dict[int, float] = Field(default_factory=dict)
     dice_std: float | None = None
+    train_dice: float | None = None  # mean over seeds, on the training tiles (None if not measured)
     hparams: dict = Field(default_factory=dict)
     debug_iters: int = 0
     final_code: str = ""
     error: str | None = None
     attempts: list[dict] = Field(default_factory=list)
+
+
+def _mean_or_none(values: list) -> float | None:
+    known = [v for v in values if v is not None]
+    return float(np.mean(known)) if known else None
 
 
 def _run_once(pipeline_path: Path, data_npz_path: Path, timeout_s: int, seed: int) -> dict:
@@ -98,6 +104,7 @@ def run_agent_round(
                 iou=float(np.mean([r["iou"] for r in ok_runs])),
                 dice_per_seed={r["seed"]: r["dice"] for r in ok_runs},
                 dice_std=float(np.std(dices)),
+                train_dice=_mean_or_none([r.get("train_dice") for r in ok_runs]),
                 hparams=ok_runs[0].get("hparams", {}),
                 debug_iters=attempt,
                 final_code=code,

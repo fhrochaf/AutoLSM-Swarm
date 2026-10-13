@@ -165,6 +165,8 @@ def main(argv: list[str] | None = None) -> None:
             json.dumps({
                 "n_agents": settings.n_agents,
                 "n_rounds": settings.n_rounds,
+                "max_train_tiles": settings.max_train_tiles,  # to rebuild the same training set offline
+                "eval_seeds": settings.active_seeds(),
                 "agents": [  # one entry per agent_idx; API keys are never written
                     g.model_dump(include={"llm_provider", "model_name", "max_tokens", "model_kwargs"}) for g in settings.agent_models()
                 ],

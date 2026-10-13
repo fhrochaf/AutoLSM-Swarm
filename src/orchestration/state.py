@@ -34,6 +34,7 @@ class AgentState(BaseModel):
     last_dice_per_seed: dict[int, float] = {}
     last_dice_std: float | None = None
     last_iou: float | None = None
+    last_train_dice: float | None = None  # same pipeline scored on its training tiles
     last_hparams: dict = {}  # HPARAMS of the latest successful run
     last_error: str | None = None  # why the latest run failed; None if it succeeded
     # Private notes the agent writes along with each pipeline and reads back next round --

@@ -187,6 +187,7 @@ def _build_node(state: SwarmState, settings: Settings, agent_idx: int) -> dict:
             "last_dice_per_seed": result.dice_per_seed,
             "last_dice_std": result.dice_std,
             "last_iou": result.iou,
+            "last_train_dice": result.train_dice,
             "last_hparams": result.hparams if result.success else agent.last_hparams,
             "last_error": None if result.success else result.error,
             "notebook": notebook,
@@ -206,6 +207,7 @@ def _build_node(state: SwarmState, settings: Settings, agent_idx: int) -> dict:
             "dice_per_seed": result.dice_per_seed,
             "dice_std": result.dice_std,
             "iou": result.iou,
+            "train_dice": result.train_dice,  # mean over seeds, on the training tiles
             "success": result.success,
             "error": result.error,
             "debug_iters": result.debug_iters,

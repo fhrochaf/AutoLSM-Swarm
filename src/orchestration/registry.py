@@ -73,6 +73,7 @@ def build_record(
         "retrieval_pool_size": settings.retrieval_pool_size,
         "mmr_lambda": settings.mmr_lambda,
         "retrieval_filter": settings.retrieval_filter,
+        "retrieval_l4s_usable_only": settings.retrieval_l4s_usable_only,
         "enriched_reflection_all": settings.enriched_reflection_all,
         "random_enriched_reflection": settings.random_enriched_reflection,
         "fidelity_check": settings.fidelity_check,

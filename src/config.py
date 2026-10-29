@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     #   {"$and": [{"year": {"$gte": 2022}}, {"reproducibility_status": {"$in": ["REPRODUCIBLE", "PARTIALLY_REPRODUCIBLE"]}}]}
     # Also settable per run as JSON: RETRIEVAL_FILTER='{"year": {"$gte": 2022}}'
     retrieval_filter: dict | None = {"method_class_name": {"$in": ["CNN-based Semantic Segmentation", "Hybrid & Advanced Architectures"]}}
+    # On top of retrieval_filter, keep only papers whose method runs on single-date optical/DEM data
+    # like Landslide4Sense's, dropping those needing SAR/InSAR, LiDAR or multi-temporal input
+    # (utils.l4s_usable_paper_ids; needs corpus_metadata_csv). Applied at query time, no --rebuild-index.
+    retrieval_l4s_usable_only: bool = True
     # The actual paper PDFs -- same paper_id stems as corpus_json_dir's *.json files.
     # The JSON summaries are a cheap pre-filter; retrieval hydrates the top matches
     # with an excerpt of the real full text from here (see corpus/pdf_extract.py).

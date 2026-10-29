@@ -331,7 +331,7 @@ is that variant for one agent: it also drops every mention of peers, a swarm and
 the agent only sees its own behavior report and its own best pipeline. A baseline run is
 `USE_RAG=false PROMPTS_FILE=prompts_singleagent_noRag.yaml python main.py --agents 1 --rounds 10`.
 `use_rag` is recorded in the registry next to `retrieval_strategy`, `retrieval_k`,
-`retrieval_pool_size`, `mmr_lambda` and `retrieval_filter`.
+`retrieval_pool_size`, `mmr_lambda`, `retrieval_filter` and `retrieval_l4s_usable_only`.
 
 ### Metadata filter on retrieval
 
@@ -347,6 +347,14 @@ Segmentation"}` or `{"$and": [{"year": {"$gte": 2022}}, {"reproducibility_status
 Changing the CSV or its path needs `--rebuild-index` (which now drops the old collection first
 instead of appending duplicates); changing only the filter does not. A filter matching fewer than
 `retrieval_k × n_agents` papers gives agents fewer papers, and one matching none will fail.
+
+`retrieval_l4s_usable_only` (default `True`; `RETRIEVAL_L4S_USABLE_ONLY=false` to disable) ANDs
+`retrieval_filter` with a `paper_id` allowlist from `utils.l4s_usable_paper_ids`. That function drops
+papers the human review left unclassified, and also papers whose JSON summary, title, abstract,
+datasets or methods mention SAR/InSAR, LiDAR or multi-temporal/change-detection input, since
+Landslide4Sense can't supply those. It uses the same regexes as `fig_corpus_applicability` in
+`notebooks/all_runs_overview.ipynb`. The filter is applied at query time, so it needs no rebuild,
+and it is recorded in the registry.
 
 ### Round-0 retrieval strategies
 

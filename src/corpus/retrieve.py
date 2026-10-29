@@ -7,6 +7,16 @@ from langchain_core.documents import Document
 from config import Settings
 from corpus.ingest import get_embeddings
 from corpus.pdf_extract import get_full_text
+from utils import l4s_usable_paper_ids
+
+
+def _where(settings: Settings) -> dict | None:
+    """The Chroma `where` dict for every retrieval: settings.retrieval_filter, AND-ed with the
+    papers whose data L4S can supply when settings.retrieval_l4s_usable_only is on."""
+    if not (settings.retrieval_l4s_usable_only and settings.corpus_metadata_csv):
+        return settings.retrieval_filter
+    ids = {"paper_id": {"$in": sorted(l4s_usable_paper_ids(settings.corpus_metadata_csv, settings.corpus_json_dir))}}
+    return {"$and": [settings.retrieval_filter, ids]} if settings.retrieval_filter else ids
 
 
 def get_vectorstore(settings: Settings) -> Chroma:
@@ -21,10 +31,10 @@ def retrieve(
     query: str, settings: Settings, k: int | None = None, filters: dict | None = None
 ) -> list[Document]:
     """Top-k papers for `query`. `filters` (a Chroma `where` dict) defaults to
-    settings.retrieval_filter, so every corpus retrieval honours the configured filter."""
+    _where(settings), so every corpus retrieval honours the configured filter."""
     store = get_vectorstore(settings)
     return store.similarity_search(
-        query, k=k or settings.retrieval_k, filter=filters or settings.retrieval_filter
+        query, k=k or settings.retrieval_k, filter=filters or _where(settings)
     )
 
 
@@ -32,7 +42,7 @@ def _shard(query: str, settings: Settings, n_agents: int, k: int) -> list[list[D
     """The top k * n_agents papers by similarity, dealt out round-robin."""
     store = get_vectorstore(settings)
     pool_size = min(k * n_agents, store._collection.count())
-    candidates = store.similarity_search(query, k=pool_size, filter=settings.retrieval_filter)
+    candidates = store.similarity_search(query, k=pool_size, filter=_where(settings))
     return [candidates[i::n_agents][:k] for i in range(n_agents)]
 
 
@@ -45,7 +55,7 @@ def _mmr_order(query: str, settings: Settings, store: Chroma, n: int, fetch_k: i
     each next paper is relevant to the query and dissimilar to those already chosen, so the
     list comes out most-different-first."""
     return store.max_marginal_relevance_search(
-        query, k=n, fetch_k=fetch_k, lambda_mult=settings.mmr_lambda, filter=settings.retrieval_filter
+        query, k=n, fetch_k=fetch_k, lambda_mult=settings.mmr_lambda, filter=_where(settings)
     )
 
 
@@ -69,7 +79,7 @@ def _cluster(query: str, settings: Settings, n_agents: int, k: int) -> list[list
 
     store = get_vectorstore(settings)
     pool = _pool_size(settings, store, n_agents, k)
-    candidates = store.similarity_search(query, k=pool, filter=settings.retrieval_filter)  # best match first
+    candidates = store.similarity_search(query, k=pool, filter=_where(settings))  # best match first
     ids = [d.metadata["paper_id"] for d in candidates]
     stored = store.get(where={"paper_id": {"$in": ids}}, include=["embeddings", "metadatas"])
     emb_by_id = {m["paper_id"]: e for m, e in zip(stored["metadatas"], stored["embeddings"])}

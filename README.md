@@ -320,6 +320,10 @@ The fidelity and enrichment prompts are only required when those features are sw
 Each run stores the file it used as `<run>/prompts_used.yaml`, and the registry records its
 name and a short hash (`prompts_file`, `prompts_sha`), so results can be traced to the exact
 prompt text; `--resume` warns if the file changed since the run started.
+Each run also stores every resolved setting as `<run>/config_used.json`: `config.py` defaults with
+`.env`, environment variables and CLI flags applied, but without API keys
+(`utils.save_settings`). A `--resume` writes `config_used_resume_r<round>.json` and leaves
+the original file as it was.
 
 ### Ablation: no literature, single agent
 

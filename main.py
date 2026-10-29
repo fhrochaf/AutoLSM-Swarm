@@ -16,6 +16,7 @@ from config import Settings
 from corpus.ingest import build_index
 from data.dataset import build_data_cache
 from orchestration.graph import build_graph, create_initial_state, load_run_state, new_run_id
+from utils import save_settings
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -96,6 +97,8 @@ def main(argv: list[str] | None = None) -> None:
                 f"WARNING: prompts file {PROMPTS_PATH.name} differs from the {used.name} stored with run "
                 f"{run_id}; rounds from here on use the current text."
             )
+        # A resume may run under different settings; keep the original config_used.json intact.
+        save_settings(settings, settings.runs_dir / run_id / f"config_used_resume_r{state.round}.json")
     else:
         run_id = new_run_id()
         print(f"Run {run_id}: {settings.n_agents} agent(s) x {settings.n_rounds} round(s)")
@@ -113,6 +116,7 @@ def main(argv: list[str] | None = None) -> None:
         state = create_initial_state(settings, run_id, data_npz_path)
         recursion_limit = settings.n_rounds + 10
         shutil.copy2(PROMPTS_PATH, settings.runs_dir / run_id / "prompts_used.yaml")
+        save_settings(settings, settings.runs_dir / run_id / "config_used.json")
         print(f"Prompts: {PROMPTS_PATH.name} (sha {PROMPTS_SHA})")
 
     graph = build_graph(settings)

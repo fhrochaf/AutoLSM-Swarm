@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
 import subprocess
 from functools import lru_cache
@@ -35,6 +36,15 @@ def git_version() -> dict:
         return {"commit": commit, "dirty": dirty}
     except Exception:
         return {"commit": None, "dirty": None}
+
+
+def save_settings(settings, path: Path) -> None:
+    """Write every resolved setting (config.py defaults + .env + env vars + CLI overrides) to
+    `path` as JSON, so a run folder records exactly how it was configured. API keys are left out."""
+    secret = lambda name: "api_key" in name or name.endswith("_key")
+    dump = {k: v for k, v in settings.model_dump(mode="json").items() if not secret(k)}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dump, indent=2), encoding="utf-8")
 
 
 @lru_cache(maxsize=None)

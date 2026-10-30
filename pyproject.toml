@@ -47,3 +47,10 @@ notebook = [
     "pandas>=3.0.5",
     "umap-learn>=0.5.12",
 ]
+skills = [
+    "imageio>=2.31",
+    "imageio-ffmpeg>=0.4.9",
+    "numpy>=1.24",
+    "pillow>=10.0",
+    "playwright>=1.40",
+]
